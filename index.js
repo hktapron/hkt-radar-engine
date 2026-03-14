@@ -23,7 +23,9 @@ async function pollRadarData() {
         console.log(`[${new Date().toISOString()}] Fetching flights from Flightradar24...`);
         const now = new Date();
         
-        // Step 1: Get all flights in the region (4-hour radius around Phuket)
+        // Step 1: Get all flights in a ~4-hour radius around Phuket
+        // Note: Larger boxes hit the 1500 cap, causing FR24 to randomly drop nearby HKT flights
+        // This 4-hour box reliably captures 17-20 HKT-bound flights (~1400 total in box)
         const allFlights = await fetchFromRadar(30.0, 70.0, -15.0, 120.0);
         
         if (!allFlights || allFlights.length === 0) {
