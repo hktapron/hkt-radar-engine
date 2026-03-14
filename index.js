@@ -52,9 +52,9 @@ async function pollRadarData() {
         const now = new Date();
         
         // Exact API Signature: fetchFromRadar(north, west, south, east)
-        // Expanded to capture a ~7 hour flight radius around Phuket (cruising speed ~800-900 km/h)
-        // Covering roughly: Russia/Japan (North), Middle East (West), Australia (South), Pacific (East)
-        const flights = await fetchFromRadar(60.0, 40.0, -45.0, 155.0);
+        // Set to a ~4 hour flight radius around Phuket (cruising speed ~800-900 km/h)
+        // Limits must be kept so we don't hit the 1500 plane hard cap of the free API
+        const flights = await fetchFromRadar(30.0, 70.0, -15.0, 120.0);
         
         if (!flights || flights.length === 0) {
             console.log(`[${now.toISOString()}] No aircraft found in the bounding box.`);
@@ -115,9 +115,9 @@ async function pollRadarData() {
             };
         }).filter(f => f !== null);
 
-        // Post-processing filter: Only keep flights with an ETA of <= 7 hours (25,200 seconds) 
+        // Post-processing filter: Only keep flights with an ETA of <= 4 hours (14,400 seconds) 
         // or flights that have already landed
-        const maxEtaSeconds = 7 * 60 * 60; 
+        const maxEtaSeconds = 4 * 60 * 60; 
         const filteredFlights = processedFlights.filter(flight => {
             if (flight.Status === 'LANDED') return true;
             if (flight.Status === 'STATIONARY / HOLDING') return false; // Filter out ground traffic far away
@@ -136,7 +136,7 @@ async function pollRadarData() {
             lastFetchTime = now;
         }
         
-        console.log(`[${now.toISOString()}] Cache updated. Tracking ${filteredFlights.length} aircraft (<= 7 hours ETA).`);
+        console.log(`[${now.toISOString()}] Cache updated. Tracking ${filteredFlights.length} aircraft (<= 4 hours ETA).`);
 
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Error fetching from Flightradar24: ${error.message}`);
@@ -154,7 +154,12 @@ setInterval(pollRadarData, POLLING_INTERVAL);
 // ===================================
 
 app.get('/api/flights/eta', (req, res) => {
-    res.json(flightDataCache);
+    // Requirements stated: returns a clean JSON array with ONLY Callsign and ETA
+    const slimData = flightDataCache.map(f => ({
+        Callsign: f.Callsign,
+        ETA: f.ETA
+    }));
+    res.json(slimData);
 });
 
 app.get('/api/external/flights', (req, res) => {
@@ -162,7 +167,12 @@ app.get('/api/external/flights', (req, res) => {
     if (apiKey !== 'hkt-apron-static-key') {
         return res.status(401).json({ error: 'Unauthorized: Invalid or missing x-api-key' });
     }
-    res.json(flightDataCache);
+    // External API also returns ONLY Callsign and ETA
+    const slimData = flightDataCache.map(f => ({
+        Callsign: f.Callsign,
+        ETA: f.ETA
+    }));
+    res.json(slimData);
 });
 
 app.get('/api/health', (req, res) => {
