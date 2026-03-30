@@ -14,11 +14,12 @@ let flightDataCache = [];
 let lastFetchTime = null;
 const reportedLandedFlights = new Map(); // Store flight IDs that have already reported ATA
 const reportedDepartedFlights = new Map(); // Store flight IDs that have already reported ATD
-const trackedArrivals = new Map(); // Track HKT-bound flights across polls: id -> { callsign, iata, lastETA }
+const trackedArrivals = new Map(); // Track HKT-bound flights across polls: id -> { callsign, iata, lastETA, missCount }
 const POLLING_INTERVAL = 60 * 1000; // 60 seconds
 const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
 const REPORT_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 const ATA_WINDOW_MS = 15 * 60 * 1000; // 15 minutes - max gap between ETA and now to consider it a real landing
+const MISS_THRESHOLD = 3; // Must be missing from radar for 3 consecutive polls (~3 min) before confirming landing
 
 /**
  * Multiple scanning zones to beat the 1500-flight cap.
@@ -94,8 +95,8 @@ async function pollRadarData() {
                     const detail = await fetchFlight(flight.id);
                     const eta = detail.arrival || detail.scheduledArrival || null;
                     
-                    // Track this flight for disappearance detection
-                    trackedArrivals.set(flight.id, { callsign, iata, lastETA: eta });
+                    // Track this flight for disappearance detection (reset missCount since we see it)
+                    trackedArrivals.set(flight.id, { callsign, iata, lastETA: eta, missCount: 0 });
                     
                     // Report ETA normally (still in air)
                     responseData.set(flight.id, { Callsign: callsign, IATA: iata, ETA: eta });
@@ -125,23 +126,28 @@ async function pollRadarData() {
             // Skip if already reported
             if (reportedLandedFlights.has(id)) continue;
             
-            // Flight disappeared! Check if ETA was close to now (within 30 min)
+            // Flight not seen this poll — increment miss counter
+            info.missCount = (info.missCount || 0) + 1;
+            
             if (info.lastETA) {
                 const etaTime = new Date(info.lastETA).getTime();
                 const timeDiff = now.getTime() - etaTime;
                 
-                if (timeDiff > -ATA_WINDOW_MS && timeDiff < ATA_WINDOW_MS) {
-                    // ETA was within 30 min of now -> likely landed
+                if (info.missCount >= MISS_THRESHOLD && timeDiff > -ATA_WINDOW_MS && timeDiff < ATA_WINDOW_MS) {
+                    // Missing for 3+ polls AND ETA is within 15 min of now -> confirmed landing
                     responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.lastETA });
                     reportedLandedFlights.set(id, Date.now());
                     trackedArrivals.delete(id);
-                    console.log(`  🛬 ${info.callsign} disappeared from radar near ETA. Reporting ATA: ${info.lastETA}`);
+                    console.log(`  🛬 ${info.callsign} confirmed landed (missing ${info.missCount} polls, ETA: ${info.lastETA}). Reporting ATA.`);
                 } else if (timeDiff >= ATA_WINDOW_MS) {
                     // ETA was long ago but we never caught it -> clean up
                     trackedArrivals.delete(id);
                     console.log(`  🗑️ ${info.callsign} expired from tracking (ETA too old).`);
+                } else if (info.missCount < MISS_THRESHOLD) {
+                    // Not enough misses yet, could be radar glitch
+                    console.log(`  🔍 ${info.callsign} missing poll ${info.missCount}/${MISS_THRESHOLD}, waiting...`);
                 }
-                // If ETA is still far in the future -> radar glitch, keep tracking
+                // If ETA is still far in the future -> radar glitch, keep tracking silently
             }
         }
         
@@ -220,7 +226,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v3.5 — Smart ATA Detection + ATD Single-Shot`);
+    console.log(`🛰️  HKT-Radar-Engine v3.6 — Smart ATA (3-poll confirm) + ATD Single-Shot`);
     console.log(`📡 ${SCAN_ZONES.length} zones × 1500 = up to ${SCAN_ZONES.length * 1500} flights scanned`);
     console.log(`🌐 Port ${PORT}`);
     console.log(`👉 http://localhost:${PORT}/api/flights/eta`);
