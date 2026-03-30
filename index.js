@@ -9,10 +9,14 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// In-memory Cache
+// In-memory Cache & State
 let flightDataCache = [];
 let lastFetchTime = null;
+const reportedLandedFlights = new Map(); // Store flight IDs that have already reported ATA
+const reportedDepartedFlights = new Map(); // Store flight IDs that have already reported ATD
 const POLLING_INTERVAL = 60 * 1000; // 60 seconds
+const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+const REPORT_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
  * Multiple scanning zones to beat the 1500-flight cap.
@@ -51,6 +55,7 @@ async function pollRadarData() {
                         flightMap.set(f.id, f);
                     }
                     if (f.destination && f.destination.toUpperCase() === 'HKT') zoneHkt++;
+                    if (f.origin && f.origin.toUpperCase() === 'HKT') zoneHkt++;
                 }
                 console.log(`  📡 ${zone.name}: ${flights.length} flights (${zoneHkt} HKT)`);
                 // Small delay between zone fetches
@@ -63,32 +68,82 @@ async function pollRadarData() {
         const allFlights = Array.from(flightMap.values());
         console.log(`  📊 Total unique flights: ${allFlights.length}`);
         
-        // Step 2: Filter only flights with destination HKT
-        const hktFlights = allFlights.filter(f => 
+        // Step 2: Filter flights with destination HKT or origin HKT
+        const hktArrivals = allFlights.filter(f => 
             f.destination && f.destination.toUpperCase() === 'HKT'
         );
+        const hktDepartures = allFlights.filter(f => 
+            f.origin && f.origin.toUpperCase() === 'HKT'
+        );
         
-        console.log(`  ✈️ HKT-bound: ${hktFlights.length}`);
+        console.log(`  ✈️ HKT-bound: ${hktArrivals.length} | HKT-departing: ${hktDepartures.length}`);
         
-        if (hktFlights.length === 0) {
+        if (hktArrivals.length === 0 && hktDepartures.length === 0) {
             flightDataCache = [];
             lastFetchTime = now;
             return;
         }
         
-        // Step 3: Fetch REAL FR24 ETA for each HKT flight
+        // Step 3: Fetch REAL FR24 ETA/ATA for each HKT arrival
         const detailedFlights = [];
         
-        for (const flight of hktFlights) {
+        for (const flight of hktArrivals) {
             try {
                 const detail = await fetchFlight(flight.id);
                 const callsign = flight.callsign || flight.flight || flight.registration || 'UNKNOWN';
-                const eta = detail.arrival || detail.scheduledArrival || null;
                 
-                detailedFlights.push({
-                    Callsign: typeof callsign === 'string' ? callsign.trim() : 'UNKNOWN',
-                    ETA: eta
-                });
+                // ATA Logic: If flight is on ground, it has landed at HKT
+                if (flight.isOnGround) {
+                    if (!reportedLandedFlights.has(flight.id)) {
+                        // First time reporting this landing
+                        detailedFlights.push({
+                            Callsign: typeof callsign === 'string' ? callsign.trim() : 'UNKNOWN',
+                            ATA: detail.arrival
+                        });
+                        reportedLandedFlights.set(flight.id, Date.now());
+                        console.log(`  🛬 ${callsign} LANDED. Reporting ATA and clearing from next polls.`);
+                    } else {
+                        // Already reported ATA, skip this flight entirely
+                        console.log(`  🧹 ${callsign} already reported ATA. Skipping.`);
+                        continue; 
+                    }
+                } else {
+                    // Flight is still in the air, report ETA
+                    const eta = detail.arrival || detail.scheduledArrival || null;
+                    detailedFlights.push({
+                        Callsign: typeof callsign === 'string' ? callsign.trim() : 'UNKNOWN',
+                        ETA: eta
+                    });
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (err) {
+                console.log(`  ⚠️ Detail failed for ${flight.callsign || flight.id}: ${err.message}`);
+            }
+        }
+        
+        // Step 4: Fetch ATD for each HKT departure
+        for (const flight of hktDepartures) {
+            try {
+                const callsign = flight.callsign || flight.flight || flight.registration || 'UNKNOWN';
+                
+                // ATD Logic: If flight has taken off (not on ground) and origin is HKT
+                if (!flight.isOnGround) {
+                    if (!reportedDepartedFlights.has(flight.id)) {
+                        const detail = await fetchFlight(flight.id);
+                        // First time reporting this departure
+                        detailedFlights.push({
+                            Callsign: typeof callsign === 'string' ? callsign.trim() : 'UNKNOWN',
+                            ATD: detail.departure
+                        });
+                        reportedDepartedFlights.set(flight.id, Date.now());
+                        console.log(`  🛫 ${callsign} DEPARTED HKT. Reporting ATD.`);
+                    } else {
+                        // Already reported ATD, skip
+                        console.log(`  🧹 ${callsign} already reported ATD. Skipping.`);
+                    }
+                }
+                // If still on ground at HKT (not departed yet), we don't report anything
                 
                 await new Promise(resolve => setTimeout(resolve, 200));
             } catch (err) {
@@ -102,7 +157,7 @@ async function pollRadarData() {
             lastFetchTime = now;
         }
         
-        console.log(`[${now.toISOString()}] ✅ Cache updated: ${detailedFlights.length} HKT flights with FR24 ETA.\n`);
+        console.log(`[${now.toISOString()}] ✅ Cache updated: ${detailedFlights.length} HKT flights.\n`);
 
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Error: ${error.message}`);
@@ -114,6 +169,25 @@ pollRadarData();
 
 // Poll every 60 seconds
 setInterval(pollRadarData, POLLING_INTERVAL);
+
+// Cleanup reported flights every hour to prevent memory bloat
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [id, timestamp] of reportedLandedFlights.entries()) {
+        if (now - timestamp > REPORT_EXPIRY) {
+            reportedLandedFlights.delete(id);
+            cleaned++;
+        }
+    }
+    for (const [id, timestamp] of reportedDepartedFlights.entries()) {
+        if (now - timestamp > REPORT_EXPIRY) {
+            reportedDepartedFlights.delete(id);
+            cleaned++;
+        }
+    }
+    if (cleaned > 0) console.log(`[CLEANUP] Removed ${cleaned} expired flight reports.`);
+}, CLEANUP_INTERVAL);
 
 // ===================================
 // API Endpoints
@@ -141,7 +215,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v3.0 — Multi-Zone Scan`);
+    console.log(`🛰️  HKT-Radar-Engine v3.1 — Multi-Zone Scan + ATA/ATD`);
     console.log(`📡 ${SCAN_ZONES.length} zones × 1500 = up to ${SCAN_ZONES.length * 1500} flights scanned`);
     console.log(`🌐 Port ${PORT}`);
     console.log(`👉 http://localhost:${PORT}/api/flights/eta`);
