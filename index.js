@@ -133,8 +133,8 @@ async function pollRadarData() {
                 const etaTime = new Date(info.lastETA).getTime();
                 const timeDiff = now.getTime() - etaTime;
                 
-                if (info.missCount >= MISS_THRESHOLD && timeDiff > -ATA_WINDOW_MS && timeDiff < ATA_WINDOW_MS) {
-                    // Missing for 3+ polls AND ETA is within 15 min of now -> confirmed landing
+                if (info.missCount >= MISS_THRESHOLD && timeDiff >= 0 && timeDiff < ATA_WINDOW_MS) {
+                    // Missing for 3+ polls AND ETA has PASSED (within last 15 min) -> confirmed landing
                     responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.lastETA });
                     reportedLandedFlights.set(id, Date.now());
                     trackedArrivals.delete(id);
