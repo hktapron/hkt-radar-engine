@@ -14,9 +14,11 @@ let flightDataCache = [];
 let lastFetchTime = null;
 const reportedLandedFlights = new Map(); // Store flight IDs that have already reported ATA
 const reportedDepartedFlights = new Map(); // Store flight IDs that have already reported ATD
+const trackedArrivals = new Map(); // Track HKT-bound flights across polls: id -> { callsign, iata, lastETA }
 const POLLING_INTERVAL = 60 * 1000; // 60 seconds
 const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
 const REPORT_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
+const ATA_WINDOW_MS = 30 * 60 * 1000; // 30 minutes - max gap between ETA and now to consider it a real landing
 
 /**
  * Multiple scanning zones to beat the 1500-flight cap.
@@ -70,6 +72,7 @@ async function pollRadarData() {
         
         // Step 3: Process flights of interest (Origin or Destination = HKT)
         const responseData = new Map();
+        const seenArrivalIds = new Set(); // Track which arrival IDs we see in THIS poll
         
         for (const flight of allFlights) {
             const origin = (flight.origin || "").toUpperCase();
@@ -84,30 +87,28 @@ async function pollRadarData() {
             try {
                 const callsign = flight.callsign || flight.flight || flight.registration || 'UNKNOWN';
                 const iata = flight.flight || 'UNKNOWN';
-                const onGround = flight.isOnGround;
 
                 if (destination === "HKT") {
                     // --- ARRIVAL LOGIC ---
+                    seenArrivalIds.add(flight.id);
                     const detail = await fetchFlight(flight.id);
-                    if (onGround) {
-                        // First time landing detection
-                        responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: detail.arrival });
-                        reportedLandedFlights.set(flight.id, Date.now());
-                        console.log(`  🛬 ${callsign} (HKT Arrival) LANDED. Reporting ATA.`);
-                    } else {
-                        // Still in air, reporting ETA normally
-                        responseData.set(flight.id, { Callsign: callsign, IATA: iata, ETA: detail.arrival || detail.scheduledArrival });
-                    }
+                    const eta = detail.arrival || detail.scheduledArrival || null;
+                    
+                    // Track this flight for disappearance detection
+                    trackedArrivals.set(flight.id, { callsign, iata, lastETA: eta });
+                    
+                    // Report ETA normally (still in air)
+                    responseData.set(flight.id, { Callsign: callsign, IATA: iata, ETA: eta });
+                    
                 } else if (origin === "HKT") {
                     // --- DEPARTURE LOGIC ---
-                    if (!onGround) {
-                        // First time take-off detection (we only report once it's in the air)
+                    if (!flight.isOnGround) {
+                        // First time take-off detection
                         const detail = await fetchFlight(flight.id);
                         responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATD: detail.departure });
                         reportedDepartedFlights.set(flight.id, Date.now());
                         console.log(`  🛫 ${callsign} (HKT Departure) TOOK OFF. Reporting ATD.`);
                     }
-                    // If still on ground at HKT, we don't add to responseData (silent until departure)
                 }
 
                 // Small delay between detailed fetches
@@ -117,12 +118,40 @@ async function pollRadarData() {
             }
         }
         
+        // Step 5: Detect landed flights (disappeared from radar)
+        for (const [id, info] of trackedArrivals.entries()) {
+            // Skip if we still see this flight in the current scan
+            if (seenArrivalIds.has(id)) continue;
+            // Skip if already reported
+            if (reportedLandedFlights.has(id)) continue;
+            
+            // Flight disappeared! Check if ETA was close to now (within 30 min)
+            if (info.lastETA) {
+                const etaTime = new Date(info.lastETA).getTime();
+                const timeDiff = now.getTime() - etaTime;
+                
+                if (timeDiff > -ATA_WINDOW_MS && timeDiff < ATA_WINDOW_MS) {
+                    // ETA was within 30 min of now -> likely landed
+                    responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.lastETA });
+                    reportedLandedFlights.set(id, Date.now());
+                    trackedArrivals.delete(id);
+                    console.log(`  🛬 ${info.callsign} disappeared from radar near ETA. Reporting ATA: ${info.lastETA}`);
+                } else if (timeDiff >= ATA_WINDOW_MS) {
+                    // ETA was long ago but we never caught it -> clean up
+                    trackedArrivals.delete(id);
+                    console.log(`  🗑️ ${info.callsign} expired from tracking (ETA too old).`);
+                }
+                // If ETA is still far in the future -> radar glitch, keep tracking
+            }
+        }
+        
         // Update global cache
         flightDataCache = Array.from(responseData.values());
         if (flightDataCache.length > 0) {
             lastFetchTime = now;
         }
         
+        console.log(`  📋 Tracking ${trackedArrivals.size} arrivals`);
         console.log(`[${now.toISOString()}] ✅ Cache updated: ${flightDataCache.length} Phuket flights.\n`);
 
     } catch (error) {
@@ -152,7 +181,17 @@ setInterval(() => {
             cleaned++;
         }
     }
-    if (cleaned > 0) console.log(`[CLEANUP] Removed ${cleaned} expired flight reports.`);
+    // Also clean stale tracked arrivals (older than 24 hours)
+    for (const [id, info] of trackedArrivals.entries()) {
+        if (info.lastETA) {
+            const etaTime = new Date(info.lastETA).getTime();
+            if (now - etaTime > REPORT_EXPIRY) {
+                trackedArrivals.delete(id);
+                cleaned++;
+            }
+        }
+    }
+    if (cleaned > 0) console.log(`[CLEANUP] Removed ${cleaned} expired flight records.`);
 }, CLEANUP_INTERVAL);
 
 // ===================================
@@ -181,7 +220,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v3.4 — Unified Phuket Loop + ATA/ATD Single-Shot`);
+    console.log(`🛰️  HKT-Radar-Engine v3.5 — Smart ATA Detection + ATD Single-Shot`);
     console.log(`📡 ${SCAN_ZONES.length} zones × 1500 = up to ${SCAN_ZONES.length * 1500} flights scanned`);
     console.log(`🌐 Port ${PORT}`);
     console.log(`👉 http://localhost:${PORT}/api/flights/eta`);
