@@ -37,7 +37,7 @@ const POLLING_INTERVAL = 60 * 1000; // 60 seconds
 const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
 const REPORT_EXPIRY = 24 * 60 * 60 * 1000; // 24 hours
 const MISS_THRESHOLD = 3; 
-const STAND_RADIUS_METERS = 35; // Radius to consider aircraft "At Gate"
+const STAND_RADIUS_METERS = 15; // Tightened to 15m radius as requested
 // Multi-zone setup. Note: Only HKT-Ground has onGround: true to restrict massive global ground vehicle polling
 const SCAN_ZONES = [
     { name: 'SEA-Close', north: 20.0, west: 90.0, south: 0.0, east: 110.0, options: {} },
