@@ -128,7 +128,7 @@ async function pollRadarData() {
                         // GEOFENCING: Check if aircraft is at a stand
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
                         
-                        if (flight.speed <= 2 && standInfo.distance < STAND_RADIUS_METERS) {
+                        if (flight.speed < 1 && standInfo.distance < STAND_RADIUS_METERS) {
                             if (!info.potentialAibtTime) {
                                 info.potentialAibtTime = getHktTime();
                             }
@@ -153,7 +153,7 @@ async function pollRadarData() {
                             }
                         } else {
                             // Still taxiing or stopped NOT at a stand (Traffic Wait)
-                            if (flight.speed > 2) {
+                            if (flight.speed >= 1) {
                                 info.potentialAibtTime = null; // Movement reset
                                 info.zeroSpeedCount = 0;
                             }
@@ -174,7 +174,7 @@ async function pollRadarData() {
 
                     if (info.state === 'PARKED') {
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                        if (flight.isOnGround && flight.speed > 2) {
+                        if (flight.isOnGround && flight.speed >= 1) {
                             // Plane was at stand, now moving -> PUSHBACK!
                             info.state = 'TAXIING';
                             info.aobt = getHktTime();
@@ -301,8 +301,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v5.7 — Clean API Output`);
+    console.log(`🛰️  HKT-Radar-Engine v5.8 — Precision Speed Engine`);
     console.log(`🌐 Port ${PORT} | Active Zones: ${SCAN_ZONES.length}`);
-    console.log(`📍 Stand Filter: 15m radius (Event-only display)`);
+    console.log(`📍 Speed Threshold: 1.0 kts (AIBT/AOBT)`);
     console.log(`=============================================\n`);
 });
