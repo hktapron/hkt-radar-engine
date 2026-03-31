@@ -110,7 +110,6 @@ async function pollRadarData() {
                         callsign, 
                         iata, 
                         lastETA: eta, 
-                        lastAIBT: detail.arrival, // Store potential AIBT
                         missCount: 0 
                     });
                     
@@ -160,15 +159,28 @@ async function pollRadarData() {
                 
                 if (info.missCount >= MISS_THRESHOLD && timeDiff >= 0 && timeDiff < ATA_WINDOW_MS) {
                     // Missing for 3+ polls AND ETA has PASSED (within last 15 min) -> confirmed landing
+                    const ataTime = getHktTime(); // ATA = Server time NOW (≈ touchdown)
+                    
+                    // Fetch AIBT: call fetchFlight one more time to get actual gate arrival
+                    let aibtTime = null;
+                    try {
+                        const postLandDetail = await fetchFlight(id);
+                        if (postLandDetail && postLandDetail.arrival) {
+                            aibtTime = getHktTime(postLandDetail.arrival);
+                        }
+                    } catch (e) {
+                        console.log(`  ⚠️ Could not fetch AIBT for ${info.callsign}: ${e.message}`);
+                    }
+                    
                     responseData.set(id, { 
                         Callsign: info.callsign, 
                         IATA: info.iata, 
-                        ATA: getHktTime(info.lastETA),
-                        AIBT: getHktTime(info.lastAIBT) // HKT AIBT +07:00
+                        ATA: ataTime,
+                        AIBT: aibtTime
                     });
                     reportedLandedFlights.set(id, Date.now());
                     trackedArrivals.delete(id);
-                    console.log(`  🛬 ${info.callsign} confirmed landed. Reporting ATA.`);
+                    console.log(`  🛬 ${info.callsign} confirmed landed. ATA: ${ataTime} | AIBT: ${aibtTime}`);
                 } else if (timeDiff >= ATA_WINDOW_MS) {
                     // ETA was long ago but we never caught it -> clean up
                     trackedArrivals.delete(id);
@@ -256,7 +268,7 @@ app.get('/api/health', (req, res) => {
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v3.7.1 — Strict +07:00 AIBT/AOBT Logic`);
+    console.log(`🛰️  HKT-Radar-Engine v4.0 — ATA/ATD (Server Time) + AIBT/AOBT (FR24)`);
     console.log(`📡 ${SCAN_ZONES.length} zones × 1500 = up to ${SCAN_ZONES.length * 1500} flights scanned`);
     console.log(`🌐 Port ${PORT}`);
     console.log(`👉 http://localhost:${PORT}/api/flights/eta`);
