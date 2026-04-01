@@ -35,19 +35,20 @@ const recentEvents = new Map();
 const reportedArrivals = new Set(); // Prevent duplicate firing
 const reportedDepartures = new Set();
 const trackedArrivals = new Map(); // id -> { callsign, iata, state, ata, lastETA, lastPos, stallingCount, lastSeen }
-const trackedDepartures = new Map(); // id -> { callsign, iata, state, aobt, lockedStand, lastSeen }
+const trackedDepartures = new Map(); // id -> { callsign, iata, state, aobt, lockedStand, lastSeen, stallingCount }
 
 const APPROACH_INTERVAL = 60 * 1000; 
 const GROUND_INTERVAL = 15 * 1000;   
 const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; 
 const PURGE_THRESHOLD = 60 * 60 * 1000; // 1 hour: Clear inactive memory
 
-// v7.5 Thresholds: Gate-Locked Accuracy
+// v7.8 Thresholds: Ultra-Stable Accuracy
 const AIBT_STAND_RADIUS = 60;        
 const AIBT_STABLE_REQUIRED = 2;      
-const AOBT_MOVEMENT_THRESHOLD = 15;  
-const AOBT_ZERO_SPEED_THRESHOLD = 25; // Displacement required if speed is reported as 0
-const AOBT_MIN_DISPLACEMENT = 5;      // Strict requirement for any AOBT (AIQ4115 fix)
+const AOBT_MOVEMENT_THRESHOLD = 20;  // Normal movement
+const AOBT_ZERO_SPEED_THRESHOLD = 30; // Speedless heavy pushback
+const AOBT_MIN_DISPLACEMENT = 15;     // Jitter Buffer (AZV2950 Fix)
+const AOBT_STABLE_REQUIRED = 2;      // Polls required to confirm push
 
 // Contiguous Approach Zones
 const APPROACH_ZONES = [
@@ -94,7 +95,7 @@ async function pollGroup(zones, groupName) {
         
         await processFlightData(Array.from(flightMap.values()), now, groupName === 'GROUND');
         
-        // Status summary (v7.6 Professional Cleanup)
+        // HEARTBEAT summary (v7.6 Professional Cleanup)
         if (loopCounts[groupName] % 10 === 0) {
             process.stdout.write(`  [${groupName}] Active: ${trackedArrivals.size + trackedDepartures.size}, Cache: ${recentEvents.size}\n`);
         }
@@ -198,32 +199,35 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 if (!trackedDepartures.has(flight.id)) {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
                     const lockedStand = (standInfo.distance < 100) || flight.isOnGround ? standInfo : null; 
-                    trackedDepartures.set(flight.id, { callsign, iata, state: 'PARKED', aobt: null, lockedStand, lastSeen: fTimestamp });
+                    trackedDepartures.set(flight.id, { callsign, iata, state: 'PARKED', aobt: null, lockedStand, lastSeen: fTimestamp, stallingCount: 0 });
                 }
                 const info = trackedDepartures.get(flight.id);
 
                 if (info.state === 'PARKED') {
                     const currentStand = getStandInfo(flight.latitude, flight.longitude);
                     let displacement = 0;
-                    if (info.lockedStand) {
-                        displacement = getDistance(flight.latitude, flight.longitude, info.lockedStand.lat || flight.latitude, info.lockedStand.lon || flight.longitude);
+                    if (info.lockedStand && info.lockedStand.lat) {
+                        displacement = getDistance(flight.latitude, flight.longitude, info.lockedStand.lat, info.lockedStand.lon);
                     } else {
                         displacement = currentStand.distance; 
                     }
 
-                    // AOBT (v7.5): Gate-Locked Accuracy
+                    // AOBT (v7.8): Ultra-Stable Rules
                     const isMovingFast = (flight.speed >= 1.5 && displacement > AOBT_MIN_DISPLACEMENT);
                     const isMovingNormal = (flight.speed >= 0.8 && displacement > AOBT_MOVEMENT_THRESHOLD);
                     const isMovingZeroSpeed = (displacement > AOBT_ZERO_SPEED_THRESHOLD); 
 
                     if (flight.isOnGround && (isMovingFast || isMovingNormal || isMovingZeroSpeed)) {
-                        info.state = 'TAXIING';
-                        info.aobt = getHktTime(fTimestamp);
-                        const standNr = info.lockedStand ? info.lockedStand.stand : currentStand.stand;
-                        const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standNr };
-                        responseData.set(flight.id, eventData);
-                        recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
-                        console.log(`  🚜 ${callsign} PUSHBACK detected (Move: ${displacement.toFixed(1)}m, Spd: ${flight.speed}) @ ${info.aobt}`);
+                        info.stallingCount = (info.stallingCount || 0) + 1;
+                        if (info.stallingCount >= AOBT_STABLE_REQUIRED || displacement > 25) {
+                            info.state = 'TAXIING';
+                            info.aobt = getHktTime(fTimestamp);
+                            const standNr = info.lockedStand ? info.lockedStand.stand : currentStand.stand;
+                            const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standNr };
+                            responseData.set(flight.id, eventData);
+                            recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
+                            console.log(`  🚜 ${callsign} PUSHBACK detected (Move: ${displacement.toFixed(1)}m, Spd: ${flight.speed}) @ ${info.aobt}`);
+                        }
                     } else if (!flight.isOnGround) {
                         if (flight.altitude < 15000 && flight.altitude > 0) {
                             info.state = 'AIRBORNE';
@@ -254,6 +258,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             trackedDepartures.delete(flight.id);
                         }
                     } else {
+                        info.stallingCount = 0;
                         // v7.5 GATE-LOCK: Only update lastSeen if still at the stand
                         if (currentStand.distance < AIBT_STAND_RADIUS) {
                             info.lastSeen = fTimestamp;
@@ -334,8 +339,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v7.7 — Displacement Fix`);
+    console.log(`🛰️  HKT-Radar-Engine v7.8 — Jitter Guard`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`🛡️  Ground AOBT: Restored Real-Time Trigger`);
+    console.log(`🛡️  Ground AOBT: 15m Buffer + Stability Active`);
     console.log(`=============================================\n`);
 });
