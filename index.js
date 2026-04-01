@@ -94,9 +94,9 @@ async function pollGroup(zones, groupName) {
         
         await processFlightData(Array.from(flightMap.values()), now, groupName === 'GROUND');
         
-        // Heartbeat summary (v7.5 Cleanup)
+        // Status summary (v7.6 Professional Cleanup)
         if (loopCounts[groupName] % 10 === 0) {
-            process.stdout.write(`  💓 [${groupName}] Active: ${trackedArrivals.size + trackedDepartures.size}, Cache: ${recentEvents.size}\n`);
+            process.stdout.write(`  [${groupName}] Active: ${trackedArrivals.size + trackedDepartures.size}, Cache: ${recentEvents.size}\n`);
         }
         console.log(`  ✅ [${groupName}] Finished!`);
     } catch (error) {
@@ -334,7 +334,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v7.5 — Gate-Locked Fix`);
+    console.log(`🛰️  HKT-Radar-Engine v7.6 — Pro-Stability`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
     console.log(`🛡️  Ghost Pushback: Using Locked Stand Time`);
     console.log(`=============================================\n`);
