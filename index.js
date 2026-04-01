@@ -20,14 +20,18 @@ function getHktTime(input) {
 let flightDataCache = [];
 let lastFetchTime = null;
 
-const reportedArrivals = new Map(); 
-const reportedDepartures = new Map();
+// Persistence maps: flightId -> { data: {Callsign, IATA, ...}, expiry: timestamp }
+const recentEvents = new Map(); 
+
+const reportedArrivals = new Set(); // Prevent duplicate firing
+const reportedDepartures = new Set();
 const trackedArrivals = new Map(); // id -> { callsign, iata, state, ata, lastETA, lastPos: {lat, lon, speed, ts}, missCount }
 const trackedDepartures = new Map(); // id -> { callsign, iata, state, aobt }
 
-const POLLING_INTERVAL = 60 * 1000;
+const POLLING_INTERVAL = 30 * 1000; // Increased to 30s for higher precision (v6.3)
 const CLEANUP_INTERVAL = 60 * 60 * 1000;
 const REPORT_EXPIRY = 24 * 60 * 60 * 1000;
+const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; // Keep events in API for 5 minutes
 const MISS_THRESHOLD = 3; 
 const MAX_LANDED_MISSES = 45; 
 const STAND_RADIUS_METERS = 35; 
@@ -42,8 +46,8 @@ const SCAN_ZONES = [
 
 async function pollRadarData() {
     try {
-        console.log(`\n[${new Date().toISOString()}] Billing Engine (v6.2) scanning...`);
-        const now = new Date();
+        console.log(`\n[${new Date().toISOString()}] High-Freq Engine (v6.3) scanning (30s)...`);
+        const now = new Date().getTime();
         const flightMap = new Map();
         
         for (const zone of SCAN_ZONES) {
@@ -54,7 +58,7 @@ async function pollRadarData() {
                         flightMap.set(f.id, f);
                     }
                 }
-                await new Promise(resolve => setTimeout(resolve, 500));
+                await new Promise(resolve => setTimeout(resolve, 300)); // Slightly faster between zones
             } catch (err) {
                 console.log(`  ⚠️ ${zone.name} failed: ${err.message}`);
             }
@@ -95,7 +99,7 @@ async function pollRadarData() {
                         if (flight.isOnGround || flight.altitude < 100) {
                             info.state = 'LANDED';
                             info.ata = getHktTime(fTimestamp);
-                            console.log(`  🛬 ${callsign} TOUCHDOWN @ ${info.ata} (Server Time)`);
+                            console.log(`  🛬 ${callsign} TOUCHDOWN @ ${info.ata}`);
                         } else {
                             try {
                                 const detail = await fetchFlight(flight.id);
@@ -107,13 +111,14 @@ async function pollRadarData() {
                     
                     if (info.state === 'LANDED') {
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                        // AIBT Fix (v6.2): Use <= 1.0 knots to catch integer floors (like MH794)
                         if (flight.speed <= 1.0 && standInfo.distance < STAND_RADIUS_METERS) {
                             const aibt = getHktTime(fTimestamp);
-                            responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand });
-                            reportedArrivals.set(flight.id, Date.now());
+                            const eventData = { Callsign: callsign, IATA: iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
+                            responseData.set(flight.id, eventData);
+                            recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
+                            reportedArrivals.add(flight.id);
                             trackedArrivals.delete(flight.id);
-                            console.log(`  🛑 ${callsign} PARKED at Stand ${standInfo.stand} @ ${aibt}`);
+                            console.log(`  🛑 ${callsign} PARKED @ ${aibt}`);
                         } else {
                             responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: info.ata });
                         }
@@ -127,21 +132,26 @@ async function pollRadarData() {
 
                     if (info.state === 'PARKED') {
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                        if (flight.isOnGround && flight.speed >= 1.5) {
+                        // AOBT (v6.3): Higher sensitivity (speed >= 1.0 and distance > 5m)
+                        if (flight.isOnGround && flight.speed >= 1.0 && standInfo.distance > 5) {
                             info.state = 'TAXIING';
                             info.aobt = getHktTime(fTimestamp);
+                            const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standInfo.stand };
+                            responseData.set(flight.id, eventData);
+                            recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                             console.log(`  🚜 ${callsign} PUSHBACK detected @ ${info.aobt}`);
-                            responseData.set(flight.id, { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standInfo.stand });
                         } else if (!flight.isOnGround) {
                             if (flight.altitude < 10000) {
                                 info.state = 'AIRBORNE';
                                 const atd = getHktTime(fTimestamp);
-                                responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATD: atd, AOBT: atd });
-                                reportedDepartures.set(flight.id, Date.now());
+                                const eventData = { Callsign: callsign, IATA: iata, ATD: atd, AOBT: atd || getHktTime(fTimestamp) };
+                                responseData.set(flight.id, eventData);
+                                recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
+                                reportedDepartures.add(flight.id);
                                 trackedDepartures.delete(flight.id);
                                 console.log(`  🛫 ${callsign} TOOK OFF (missed taxi) @ ${atd}`);
                             } else {
-                                reportedDepartures.set(flight.id, Date.now());
+                                reportedDepartures.add(flight.id);
                                 trackedDepartures.delete(flight.id);
                             }
                         }
@@ -149,8 +159,10 @@ async function pollRadarData() {
                         if (!flight.isOnGround) {
                             info.state = 'AIRBORNE';
                             const atd = getHktTime(fTimestamp);
-                            responseData.set(flight.id, { Callsign: callsign, IATA: iata, AOBT: info.aobt, ATD: atd });
-                            reportedDepartures.set(flight.id, Date.now());
+                            const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, ATD: atd };
+                            responseData.set(flight.id, eventData);
+                            recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
+                            reportedDepartures.add(flight.id);
                             trackedDepartures.delete(flight.id);
                             console.log(`  🛫 ${callsign} TOOK OFF @ ${atd}`);
                         } else {
@@ -163,7 +175,7 @@ async function pollRadarData() {
             }
         }
         
-        // Handle Disappeared Arrivals (Ghost Block / Patience)
+        // Ghost Block / Disappeared Arrivals
         for (const [id, info] of trackedArrivals.entries()) {
             if (seenArrivalIds.has(id)) continue;
             info.missCount++;
@@ -171,29 +183,32 @@ async function pollRadarData() {
             if (info.state === 'AIRBORNE' && info.missCount >= MISS_THRESHOLD) {
                 info.state = 'LANDED';
                 info.ata = info.lastETA ? getHktTime(info.lastETA) : getHktTime(); 
-                console.log(`  🛬 ${info.callsign} vanished from air. Assigned ATA: ${info.ata}`);
+                console.log(`  🛬 ${info.callsign} vanished. Assigned ATA: ${info.ata}`);
             }
             
             if (info.state === 'LANDED') {
                  const lastPos = info.lastPos;
                  if (lastPos) {
                      const standInfo = getStandInfo(lastPos.lat, lastPos.lon);
-                     // If vanished while at stand at low speed, catch it
                      if (standInfo.distance < 40 && lastPos.speed < 5) {
                          const aibt = getHktTime(lastPos.ts);
-                         responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand });
-                         reportedArrivals.set(id, Date.now());
+                         const eventData = { Callsign: info.callsign, IATA: info.iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
+                         responseData.set(id, eventData);
+                         recentEvents.set(id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
+                         reportedArrivals.add(id);
                          trackedArrivals.delete(id);
-                         console.log(`  👻 ${info.callsign} GHOST BLOCK! Vanished at Stand ${standInfo.stand}. Using AIBT: ${aibt}`);
+                         console.log(`  👻 ${info.callsign} GHOST BLOCK @ ${aibt}`);
                          continue;
                      }
                  }
 
                  if (info.missCount >= MAX_LANDED_MISSES) {
-                     responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.ata });
-                     reportedArrivals.set(id, Date.now());
+                     const eventData = { Callsign: info.callsign, IATA: info.iata, ATA: info.ata };
+                     responseData.set(id, eventData);
+                     recentEvents.set(id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
+                     reportedArrivals.add(id);
                      trackedArrivals.delete(id);
-                     console.log(`  🗑️ ${info.callsign} timeout (45m). Final ATA fire.`);
+                     console.log(`  🗑️ ${info.callsign} persistence timeout (45m).`);
                  } else {
                      responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.ata });
                  }
@@ -201,11 +216,20 @@ async function pollRadarData() {
                  responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ETA: getHktTime(info.lastETA) });
             }
         }
+
+        // Merge Recent Finished Events (5 min history)
+        for (const [id, entry] of recentEvents.entries()) {
+            if (now > entry.expiry) {
+                recentEvents.delete(id);
+            } else {
+                responseData.set(id, entry.data);
+            }
+        }
         
         flightDataCache = Array.from(responseData.values());
         if (flightDataCache.length > 0) Object.freeze(flightDataCache);
-        lastFetchTime = now;
-        console.log(`  📋 Active Tracking: Arrivals=${trackedArrivals.size}, Departures=${trackedDepartures.size}`);
+        lastFetchTime = new Date();
+        console.log(`  📋 Active: Arr=${trackedArrivals.size}, Dep=${trackedDepartures.size}, RecentHistory=${recentEvents.size}`);
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Loop Error: ${error.message}`);
     }
@@ -215,11 +239,11 @@ pollRadarData();
 setInterval(pollRadarData, POLLING_INTERVAL);
 
 setInterval(() => {
+    // Large repo cleanup every hour
     const now = Date.now();
     let cleaned = 0;
-    const cleanRepo = (map) => { for (const [id, ts] of map.entries()) { if (now - ts > REPORT_EXPIRY) { map.delete(id); cleaned++; } } };
-    cleanRepo(reportedArrivals); cleanRepo(reportedDepartures);
-    if (cleaned > 0) console.log(`[CLEANUP] Removed ${cleaned} stale items.`);
+    // reportedArrivals and reportedDepartures only grow slowly, but we can clear every 24h if needed. 
+    // For now, persistence is handled by recentEvents.
 }, CLEANUP_INTERVAL);
 
 app.get('/api/flights/eta', (req, res) => res.json(flightDataCache));
@@ -231,8 +255,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v6.2 — Precision Billing`);
-    console.log(`🌐 Port ${PORT} | Active Zones: ${SCAN_ZONES.length}`);
-    console.log(`📍 Speed: <= 1.0 kts (AIBT) | Time: Radar Timestamp`);
+    console.log(`🛰️  HKT-Radar-Engine v6.3 — High-Frequency + History`);
+    console.log(`🌐 Port ${PORT} | Polling: 30s | Persistence: 5m`);
+    console.log(`📍 Speed: <= 1.0 (AIBT) / >= 1.0 + 5m (AOBT)`);
     console.log(`=============================================\n`);
 });
