@@ -30,7 +30,7 @@ const CLEANUP_INTERVAL = 60 * 60 * 1000;
 const REPORT_EXPIRY = 24 * 60 * 60 * 1000;
 const MISS_THRESHOLD = 3; 
 const MAX_LANDED_MISSES = 45; 
-const STAND_RADIUS_METERS = 35; // Increased buffer for Code C/E antenna offset
+const STAND_RADIUS_METERS = 35; 
 
 const SCAN_ZONES = [
     { name: 'SEA-Close', north: 20.0, west: 90.0, south: 0.0, east: 110.0, options: {} },
@@ -42,7 +42,7 @@ const SCAN_ZONES = [
 
 async function pollRadarData() {
     try {
-        console.log(`\n[${new Date().toISOString()}] Precision Engine (v6.0) scanning...`);
+        console.log(`\n[${new Date().toISOString()}] Billing Engine (v6.2) scanning...`);
         const now = new Date();
         const flightMap = new Map();
         
@@ -107,8 +107,8 @@ async function pollRadarData() {
                     
                     if (info.state === 'LANDED') {
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                        // AIBT Capture: Immediately on first stationary poll at stand (v6.0 improvement)
-                        if (flight.speed < 1.0 && standInfo.distance < STAND_RADIUS_METERS) {
+                        // AIBT Fix (v6.2): Use <= 1.0 knots to catch integer floors (like MH794)
+                        if (flight.speed <= 1.0 && standInfo.distance < STAND_RADIUS_METERS) {
                             const aibt = getHktTime(fTimestamp);
                             responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand });
                             reportedArrivals.set(flight.id, Date.now());
@@ -127,7 +127,6 @@ async function pollRadarData() {
 
                     if (info.state === 'PARKED') {
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                        // AOBT Capture: Immediate trigger on movement >= 1.5 kts (v6.1 simplified)
                         if (flight.isOnGround && flight.speed >= 1.5) {
                             info.state = 'TAXIING';
                             info.aobt = getHktTime(fTimestamp);
@@ -176,10 +175,10 @@ async function pollRadarData() {
             }
             
             if (info.state === 'LANDED') {
-                 // GHOST BLOCK: If vanished while slow and near a stand, assume it parked
                  const lastPos = info.lastPos;
                  if (lastPos) {
                      const standInfo = getStandInfo(lastPos.lat, lastPos.lon);
+                     // If vanished while at stand at low speed, catch it
                      if (standInfo.distance < 40 && lastPos.speed < 5) {
                          const aibt = getHktTime(lastPos.ts);
                          responseData.set(id, { Callsign: info.callsign, IATA: info.iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand });
@@ -232,8 +231,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v6.1 — High-Performance AIBT/AOBT`);
+    console.log(`🛰️  HKT-Radar-Engine v6.2 — Precision Billing`);
     console.log(`🌐 Port ${PORT} | Active Zones: ${SCAN_ZONES.length}`);
-    console.log(`📍 Speed: >= 1.5 kts (AOBT) / < 1.0 kts (AIBT)`);
+    console.log(`📍 Speed: <= 1.0 kts (AIBT) | Time: Radar Timestamp`);
     console.log(`=============================================\n`);
 });
