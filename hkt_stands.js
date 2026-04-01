@@ -78,7 +78,9 @@ function getStandInfo(lat, lon) {
     return {
         stand: nearest ? nearest.nr : "UNKNOWN",
         apron: nearest ? nearest.apron : "UNKNOWN",
-        distance: minDistance
+        distance: minDistance,
+        lat: nearest ? nearest.lat : null,
+        lon: nearest ? nearest.lon : null
     };
 }
 

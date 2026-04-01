@@ -334,8 +334,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v7.6 — Pro-Stability`);
+    console.log(`🛰️  HKT-Radar-Engine v7.7 — Displacement Fix`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`🛡️  Ghost Pushback: Using Locked Stand Time`);
+    console.log(`🛡️  Ground AOBT: Restored Real-Time Trigger`);
     console.log(`=============================================\n`);
 });
