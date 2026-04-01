@@ -35,15 +35,14 @@ const MISS_THRESHOLD = 3;
 const MAX_LANDED_MISSES = 45; 
 const STAND_RADIUS_METERS = 35; 
 
-// Focused HKT zones
+// Contiguous Approach Zones (Zero-Gap)
 const APPROACH_ZONES = [
-    { name: 'HKT-Approach-North', north: 8.6, west: 97.8, south: 8.12, east: 98.8, options: {} },
-    { name: 'HKT-Approach-South', north: 8.08, west: 97.8, south: 7.7, east: 98.8, options: {} },
+    { name: 'HKT-Approach-North', north: 9.5, west: 97.0, south: 8.11, east: 99.5, options: {} },
+    { name: 'HKT-Approach-South', north: 8.12, west: 97.0, south: 6.5, east: 99.5, options: {} },
 ];
 
 const GROUND_ZONES = [
-    { name: 'Apron-East (1-16)', north: 8.112, west: 98.304, south: 8.100, east: 98.312, options: { onGround: true, inactive: true } },
-    { name: 'Apron-West (31-40)', north: 8.112, west: 98.300, south: 8.100, east: 98.304, options: { onGround: true, inactive: true } },
+    { name: 'HKT-Full-Ground', north: 8.125, west: 98.295, south: 8.090, east: 98.345, options: { onGround: true, inactive: true } },
 ];
 
 async function pollGroup(zones, groupName) {
@@ -165,6 +164,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                             reportedDepartures.add(flight.id);
                             trackedDepartures.delete(flight.id);
+                            console.log(`  🛫 ${callsign} TOOK OFF @ ${atd}`);
                         } else {
                             reportedDepartures.add(flight.id);
                             trackedDepartures.delete(flight.id);
@@ -234,8 +234,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v6.5 — Dual-Frequency Mode`);
+    console.log(`🛰️  HKT-Radar-Engine v6.6 — Zero-Gap Monitoring`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`📍 West St. 31-40 | East St. 1-16`);
+    console.log(`📍 Full Airport Ground Scan Enabled`);
     console.log(`=============================================\n`);
 });
