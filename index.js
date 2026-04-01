@@ -47,7 +47,7 @@ const GROUND_ZONES = [
 
 async function pollGroup(zones, groupName) {
     try {
-        console.log(`[${new Date().toISOString()}] Loop [${groupName}] scanning...`);
+        console.log(`[${new Date().toISOString()}] Loop [${groupName}] Scanning...`);
         const now = new Date().getTime();
         const flightMap = new Map();
         
@@ -59,13 +59,14 @@ async function pollGroup(zones, groupName) {
                 }
                 await new Promise(resolve => setTimeout(resolve, 200)); 
             } catch (err) {
-                console.log(`  ⚠️ ${zone.name} failed: ${err.message}`);
+                console.log(`  ⚠️ ${zone.name} radar check failed: ${err.message}`);
             }
         }
         
         await processFlightData(Array.from(flightMap.values()), now, groupName === 'GROUND');
+        console.log(`  ✅ [${groupName}] Finished!`);
     } catch (error) {
-        console.error(`[${new Date().toISOString()}] Loop [${groupName}] Error: ${error.message}`);
+        console.error(`[${new Date().toISOString()}] Loop [${groupName}] Fatal Error: ${error.message}`);
     }
 }
 
@@ -82,12 +83,13 @@ async function processFlightData(allFlights, now, isGroundScan) {
         }
     }
 
+    const arrivalDetailPromises = [];
+
     for (const flight of allFlights) {
         const origin = (flight.origin || "").toUpperCase();
         const destination = (flight.destination || "").toUpperCase();
         const fRawTimestamp = (flight.timestamp || Math.floor(now / 1000)) * 1000;
         
-        // Anti-Future Fix: If timestamp is > 30s in the future, it's predicted/ETA data.
         const isFutureTime = (fRawTimestamp > now + 30000);
         const fTimestamp = isFutureTime ? now : fRawTimestamp;
 
@@ -112,25 +114,26 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 info.missCount = 0;
                 info.lastPos = { lat: flight.latitude, lon: flight.longitude, speed: flight.speed, ts: fTimestamp };
 
-                // Recovery logic: If state was incorrectly set to LANDED (like EY412 bug)
                 if (info.state === 'LANDED' && flight.altitude > 1500) {
                     console.log(`  ♻️ ${callsign} RECOVERY: Resetting to AIRBORNE (Altitude: ${flight.altitude}ft)`);
                     info.state = 'AIRBORNE';
                     info.ata = null;
-                    recentEvents.delete(flight.id); // Remove bad history
+                    recentEvents.delete(flight.id);
                 }
 
                 if (info.state === 'AIRBORNE') {
-                    // Strict Trigger (v6.7): Must be < 500ft and NOT in the future
                     if (!isFutureTime && (flight.isOnGround || flight.altitude < 100) && flight.altitude < 500) {
                         info.state = 'LANDED';
                         info.ata = getHktTime(fTimestamp);
                         console.log(`  🛬 ${callsign} TOUCHDOWN @ ${info.ata}`);
                     } else if (!isGroundScan) {
-                        try {
-                            const detail = await fetchFlight(flight.id);
-                            info.lastETA = detail.arrival || detail.scheduledArrival || null;
-                        } catch(e) {}
+                        // Queue up details fetch to run in parallel later
+                        arrivalDetailPromises.push((async () => {
+                            try {
+                                const detail = await fetchFlight(flight.id);
+                                info.lastETA = detail.arrival || detail.scheduledArrival || null;
+                            } catch (e) {}
+                        })());
                     }
                     if (!info.ata) {
                         responseData.set(flight.id, { Callsign: callsign, IATA: iata, ETA: getHktTime(info.lastETA) });
@@ -159,7 +162,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
 
                 if (info.state === 'PARKED') {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    // AOBT (v6.4+): Robust Logic
                     if (flight.isOnGround && (flight.speed >= 2.0 || (flight.speed >= 1.0 && standInfo.distance > 35))) {
                         info.state = 'TAXIING';
                         info.aobt = getHktTime(fTimestamp);
@@ -202,6 +204,11 @@ async function processFlightData(allFlights, now, isGroundScan) {
         }
     }
     
+    // Wait for all ETA detail requests to finish in parallel
+    if (arrivalDetailPromises.length > 0) {
+        await Promise.all(arrivalDetailPromises);
+    }
+
     // Ghost block logic
     if (isGroundScan) {
         for (const [id, info] of trackedArrivals.entries()) {
@@ -228,7 +235,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
     lastFetchTime = new Date();
 }
 
-// Separate intervals for Approach (60s) and Ground (15s)
+// Polling intervals
 setInterval(() => pollGroup(APPROACH_ZONES, 'APPROACH'), APPROACH_INTERVAL);
 setInterval(() => pollGroup(GROUND_ZONES, 'GROUND'), GROUND_INTERVAL);
 
@@ -245,8 +252,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v6.7 — Strict Validation`);
+    console.log(`🛰️  HKT-Radar-Engine v6.8 — Resilient Polling`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`🛡️  Altitude Shield & Future-Time Filter Active`);
+    console.log(`⚡ Async Parallel Processing Enabled`);
     console.log(`=============================================\n`);
 });
