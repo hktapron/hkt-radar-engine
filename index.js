@@ -9,6 +9,14 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
+/**
+ * API Timeout Wrapper: Prevents engine from hanging on slow FR24 responses
+ */
+async function withTimeout(promise, ms = 30000, label = 'API') {
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} Timeout`)), ms));
+    return Promise.race([promise, timeout]);
+}
+
 // Helper: Convert Server Timestamp (Unix ms) or Date to ISO +07:00
 function getHktTime(input) {
     const date = (typeof input === 'number' && input < 2000000000) ? new Date(input * 1000) : new Date(input || Date.now());
@@ -19,24 +27,27 @@ function getHktTime(input) {
 
 let flightDataCache = [];
 let lastFetchTime = null;
+let loopCounts = { GROUND: 0, APPROACH: 0 };
 
 // Persistence maps: flightId -> { data: {Callsign, IATA, ...}, expiry: timestamp }
 const recentEvents = new Map(); 
 
 const reportedArrivals = new Set(); // Prevent duplicate firing
 const reportedDepartures = new Set();
-const trackedArrivals = new Map(); // id -> { callsign, iata, state, ata, lastETA, lastPos: {lat, lon, speed, ts}, stallingCount }
+const trackedArrivals = new Map(); // id -> { callsign, iata, state, ata, lastETA, lastPos, stallingCount, lastSeen }
 const trackedDepartures = new Map(); // id -> { callsign, iata, state, aobt, lockedStand, lastSeen }
 
 const APPROACH_INTERVAL = 60 * 1000; 
 const GROUND_INTERVAL = 15 * 1000;   
 const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; 
+const PURGE_THRESHOLD = 60 * 60 * 1000; // 1 hour: Clear inactive memory
 
-// v7.2 Thresholds: Resiliency & Accuracy
+// v7.4 Thresholds: Resilience & Anti-Spike
 const AIBT_STAND_RADIUS = 60;        
 const AIBT_STABLE_REQUIRED = 2;      
 const AOBT_MOVEMENT_THRESHOLD = 15;  
 const AOBT_ZERO_SPEED_THRESHOLD = 25; // Displacement required if speed is reported as 0
+const AOBT_MIN_DISPLACEMENT = 5;      // Strict requirement for any AOBT (AIQ4115 fix)
 
 // Contiguous Approach Zones
 const APPROACH_ZONES = [
@@ -64,13 +75,14 @@ function getDistance(lat1, lon1, lat2, lon2) {
 
 async function pollGroup(zones, groupName) {
     try {
-        console.log(`[${new Date().toISOString()}] Loop [${groupName}] Scanning...`);
+        loopCounts[groupName]++;
+        console.log(`[${new Date().toISOString()}] Loop [${groupName}] Scanning (#${loopCounts[groupName]})...`);
         const now = new Date().getTime();
         const flightMap = new Map();
         
         for (const zone of zones) {
             try {
-                const flights = await fetchFromRadar(zone.north, zone.west, zone.south, zone.east, null, zone.options);
+                const flights = await withTimeout(fetchFromRadar(zone.north, zone.west, zone.south, zone.east, null, zone.options), 30000, `Radar-${zone.name}`);
                 for (const f of flights) {
                     flightMap.set(f.id, f);
                 }
@@ -81,6 +93,11 @@ async function pollGroup(zones, groupName) {
         }
         
         await processFlightData(Array.from(flightMap.values()), now, groupName === 'GROUND');
+        
+        // Heartbeat summary
+        if (loopCounts[groupName] % 10 === 0) {
+            console.log(`  💓 HEARTBEAT [${groupName}] - Active: ${trackedArrivals.size + trackedDepartures.size} tracking, ${recentEvents.size} in cache.`);
+        }
         console.log(`  ✅ [${groupName}] Finished!`);
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Loop [${groupName}] Fatal Error: ${error.message}`);
@@ -124,10 +141,11 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 seenInThisPoll.add(flight.id);
                 if (!trackedArrivals.has(flight.id)) {
                     trackedArrivals.set(flight.id, { 
-                        callsign, iata, state: 'AIRBORNE', ata: null, lastETA: null, lastPos: null, stallingCount: 0 
+                        callsign, iata, state: 'AIRBORNE', ata: null, lastETA: null, lastPos: null, stallingCount: 0, lastSeen: fTimestamp 
                     });
                 }
                 const info = trackedArrivals.get(flight.id);
+                info.lastSeen = fTimestamp;
                 info.lastPos = { lat: flight.latitude, lon: flight.longitude, speed: flight.speed, ts: fTimestamp };
 
                 if (info.state === 'LANDED' && flight.altitude > 1500) {
@@ -145,7 +163,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     } else if (!isGroundScan) {
                         detailPromises.push((async () => {
                             try {
-                                const detail = await fetchFlight(flight.id);
+                                const detail = await withTimeout(fetchFlight(flight.id), 30000, `ArrivalDetail-${callsign}`);
                                 info.lastETA = detail.arrival || detail.scheduledArrival || null;
                             } catch (e) {}
                         })());
@@ -194,8 +212,8 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         displacement = currentStand.distance; 
                     }
 
-                    // AOBT (v7.2 Resiliency Rule)
-                    const isMovingFast = (flight.speed >= 1.5);
+                    // AOBT (v7.4 Resiliency Rule): Strictly require > 5m to avoid jitter (AIQ4115 fix)
+                    const isMovingFast = (flight.speed >= 1.5 && displacement > AOBT_MIN_DISPLACEMENT);
                     const isMovingNormal = (flight.speed >= 0.8 && displacement > AOBT_MOVEMENT_THRESHOLD);
                     const isMovingZeroSpeed = (displacement > AOBT_ZERO_SPEED_THRESHOLD); 
 
@@ -211,10 +229,9 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         if (flight.altitude < 15000 && flight.altitude > 0) {
                             info.state = 'AIRBORNE';
                             const atd = getHktTime(fTimestamp);
-                            // v7.3 Fixed: Use API actualDeparture OR LastSeen timestamp at stand
                             detailPromises.push((async () => {
                                 try {
-                                    const detail = await fetchFlight(flight.id);
+                                    const detail = await withTimeout(fetchFlight(flight.id), 30000, `GhostPushback-${callsign}`);
                                     const actualDepTs = detail.departure || detail.scheduledDeparture || (info.lastSeen / 1000);
                                     info.aobt = getHktTime(actualDepTs);
                                     console.log(`  👻 ${callsign} GHOST PUSHBACK (Source: API) @ ${info.aobt}`);
@@ -223,7 +240,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
                                     responseData.set(flight.id, eventData);
                                     recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                                 } catch (e) {
-                                    // Fallback to LastSeen at stand (No more 10-min estimate)
                                     info.aobt = getHktTime(info.lastSeen);
                                     console.log(`  👻 ${callsign} GHOST PUSHBACK (Source: LastSeen) @ ${info.aobt}`);
                                     const standNr = info.lockedStand ? info.lockedStand.stand : 'UNKNOWN';
@@ -237,9 +253,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             reportedDepartures.add(flight.id);
                             trackedDepartures.delete(flight.id);
                         }
-                    } else {
-                        // Still on ground and not moving enough -> Update LastSeen at stand
-                        info.lastSeen = fTimestamp;
                     }
                 } else if (info.state === 'TAXIING') {
                     if (!flight.isOnGround) {
@@ -285,6 +298,13 @@ async function processFlightData(allFlights, now, isGroundScan) {
                      }
                  }
             }
+            // Memory Cleanup (Arrivals)
+            if (now - info.lastSeen > PURGE_THRESHOLD) trackedArrivals.delete(id);
+        }
+        
+        // Memory Cleanup (Departures)
+        for (const [id, info] of trackedDepartures.entries()) {
+            if (now - info.lastSeen > PURGE_THRESHOLD) trackedDepartures.delete(id);
         }
     }
 
@@ -305,12 +325,12 @@ app.get('/api/external/flights', (req, res) => {
     if (req.headers['x-api-key'] !== 'hkt-apron-static-key') return res.status(401).json({ error: 'Unauthorized' });
     res.json(flightDataCache);
 });
-app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: flightDataCache.length, lastFetchTime }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: flightDataCache.length, lastFetchTime, tracking: trackedArrivals.size + trackedDepartures.size }));
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v7.3 — Last-Seen Resilio`);
+    console.log(`🛰️  HKT-Radar-Engine v7.4 — Resilience Fix`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`🛡️  Ghost Pushback: Using API/Last-Seen Time`);
+    console.log(`🛡️  Hanging Fix & Anti-Spike (5m Dist) Active`);
     console.log(`=============================================\n`);
 });
