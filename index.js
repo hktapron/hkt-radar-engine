@@ -127,11 +127,11 @@ async function pollRadarData() {
 
                     if (info.state === 'PARKED') {
                         const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                        // AOBT Capture: Robust detection (speed >= 1.5 AND moved away 15m) to avoid tug-jiggles
-                        if (flight.isOnGround && (flight.speed >= 1.5 && standInfo.distance > 15)) {
+                        // AOBT Capture: Immediate trigger on movement >= 1.5 kts (v6.1 simplified)
+                        if (flight.isOnGround && flight.speed >= 1.5) {
                             info.state = 'TAXIING';
                             info.aobt = getHktTime(fTimestamp);
-                            console.log(`  🚜 ${callsign} PUSHBACK from Stand ${standInfo.stand} @ ${info.aobt}`);
+                            console.log(`  🚜 ${callsign} PUSHBACK detected @ ${info.aobt}`);
                             responseData.set(flight.id, { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standInfo.stand });
                         } else if (!flight.isOnGround) {
                             if (flight.altitude < 10000) {
@@ -232,8 +232,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v6.0 — Precision Timing`);
+    console.log(`🛰️  HKT-Radar-Engine v6.1 — High-Performance AIBT/AOBT`);
     console.log(`🌐 Port ${PORT} | Active Zones: ${SCAN_ZONES.length}`);
-    console.log(`📍 Stand Radius: ${STAND_RADIUS_METERS}m | Precision: Server Timestamp`);
+    console.log(`📍 Speed: >= 1.5 kts (AOBT) / < 1.0 kts (AIBT)`);
     console.log(`=============================================\n`);
 });
