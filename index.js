@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { fetchFromRadar, fetchFlight } = require('flightradar24-client');
-const { getStandInfo } = require('./hkt_stands');
+const { getStandInfo, STANDS } = require('./hkt_stands');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -26,19 +26,17 @@ const recentEvents = new Map();
 const reportedArrivals = new Set(); // Prevent duplicate firing
 const reportedDepartures = new Set();
 const trackedArrivals = new Map(); // id -> { callsign, iata, state, ata, lastETA, lastPos: {lat, lon, speed, ts}, missCount }
-const trackedDepartures = new Map(); // id -> { callsign, iata, state, aobt }
+const trackedDepartures = new Map(); // id -> { callsign, iata, state, aobt, lockedStand: {nr, lat, lon} }
 
-const APPROACH_INTERVAL = 60 * 1000; // 60s for approach/departure (ATA/ATD focus)
-const GROUND_INTERVAL = 15 * 1000;   // 15s for apron/stands (AIBT/AOBT focus)
-const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; // Keep events in API for 5 minutes
-const MISS_THRESHOLD = 3; 
-const MAX_LANDED_MISSES = 45; 
+const APPROACH_INTERVAL = 60 * 1000; 
+const GROUND_INTERVAL = 15 * 1000;   
+const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; 
 
-// v6.9 Thresholds: Dual-Ground Performance
-const AIBT_STAND_RADIUS = 40;        // Meters: Wider radius for arrivals to ensure capture
-const AOBT_MOVEMENT_THRESHOLD = 15;  // Meters: Tight radius for departures to catch early pushback
+// v7.0 Thresholds: Performance & Sensitivity
+const AIBT_STAND_RADIUS = 40;        
+const AOBT_MOVEMENT_THRESHOLD = 15;  
 
-// Contiguous Approach Zones (Zero-Gap)
+// Contiguous Approach Zones
 const APPROACH_ZONES = [
     { name: 'HKT-Approach-North', north: 9.5, west: 97.0, south: 8.11, east: 99.5, options: {} },
     { name: 'HKT-Approach-South', north: 8.12, west: 97.0, south: 6.5, east: 99.5, options: {} },
@@ -47,6 +45,20 @@ const APPROACH_ZONES = [
 const GROUND_ZONES = [
     { name: 'HKT-Full-Ground', north: 8.125, west: 98.295, south: 8.090, east: 98.345, options: { onGround: true, inactive: true } },
 ];
+
+/**
+ * Calculates distance between two WGS-84 points in meters
+ */
+function getDistance(lat1, lon1, lat2, lon2) {
+    const R = 6371e3; 
+    const p1 = lat1 * Math.PI / 180;
+    const p2 = lat2 * Math.PI / 180;
+    const dp = (lat2 - lat1) * Math.PI / 180;
+    const dl = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
+}
 
 async function pollGroup(zones, groupName) {
     try {
@@ -110,11 +122,10 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 seenInThisPoll.add(flight.id);
                 if (!trackedArrivals.has(flight.id)) {
                     trackedArrivals.set(flight.id, { 
-                        callsign, iata, state: 'AIRBORNE', ata: null, lastETA: null, lastPos: null, missCount: 0 
+                        callsign, iata, state: 'AIRBORNE', ata: null, lastETA: null, lastPos: null 
                     });
                 }
                 const info = trackedArrivals.get(flight.id);
-                info.missCount = 0;
                 info.lastPos = { lat: flight.latitude, lon: flight.longitude, speed: flight.speed, ts: fTimestamp };
 
                 if (info.state === 'LANDED' && flight.altitude > 1500) {
@@ -130,7 +141,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         info.ata = getHktTime(fTimestamp);
                         console.log(`  🛬 ${callsign} TOUCHDOWN @ ${info.ata}`);
                     } else if (!isGroundScan) {
-                        // Queue up details fetch to run in parallel later
                         arrivalDetailPromises.push((async () => {
                             try {
                                 const detail = await fetchFlight(flight.id);
@@ -145,7 +155,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 
                 if (info.state === 'LANDED') {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    // AIBT (v6.9): Forgiving Arrival Radius
                     if (flight.speed <= 1.0 && standInfo.distance < AIBT_STAND_RADIUS) {
                         const aibt = getHktTime(fTimestamp);
                         const eventData = { Callsign: callsign, IATA: iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
@@ -160,20 +169,31 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 }
             } else if (isPhuketDeparture) {
                 if (!trackedDepartures.has(flight.id)) {
-                    trackedDepartures.set(flight.id, { callsign, iata, state: 'PARKED', aobt: null });
+                    // v7.0: Initial Position Locking (IPL)
+                    const standInfo = getStandInfo(flight.latitude, flight.longitude);
+                    const lockedStand = (standInfo.distance < 100) ? standInfo : null; 
+                    trackedDepartures.set(flight.id, { callsign, iata, state: 'PARKED', aobt: null, lockedStand });
                 }
                 const info = trackedDepartures.get(flight.id);
 
                 if (info.state === 'PARKED') {
-                    const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    // AOBT (v6.9): Hyper-Sensitive Pushback Threshold
-                    if (flight.isOnGround && (flight.speed >= 1.5 || (flight.speed >= 0.8 && standInfo.distance > AOBT_MOVEMENT_THRESHOLD))) {
+                    const currentStand = getStandInfo(flight.latitude, flight.longitude);
+                    let displacement = 0;
+                    if (info.lockedStand) {
+                        displacement = getDistance(flight.latitude, flight.longitude, info.lockedStand.lat || flight.latitude, info.lockedStand.lon || flight.longitude);
+                    } else {
+                        displacement = currentStand.distance; // Fallback to distance to nearest stand
+                    }
+
+                    // AOBT (v7.0): Displacement + Speed Trigger
+                    if (flight.isOnGround && (flight.speed >= 1.5 || (flight.speed >= 0.8 && displacement > AOBT_MOVEMENT_THRESHOLD))) {
                         info.state = 'TAXIING';
                         info.aobt = getHktTime(fTimestamp);
-                        const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standInfo.stand };
+                        const standNr = info.lockedStand ? info.lockedStand.stand : currentStand.stand;
+                        const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standNr };
                         responseData.set(flight.id, eventData);
                         recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
-                        console.log(`  🚜 ${callsign} PUSHBACK detected @ ${info.aobt}`);
+                        console.log(`  🚜 ${callsign} PUSHBACK detected (Move: ${displacement.toFixed(1)}m) @ ${info.aobt}`);
                     } else if (!flight.isOnGround) {
                         if (flight.altitude < 10000 && flight.altitude > 0) {
                             info.state = 'AIRBORNE';
@@ -222,7 +242,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
                  const lastPos = info.lastPos;
                  if (lastPos) {
                      const standInfo = getStandInfo(lastPos.lat, lastPos.lon);
-                     // Ghost (v6.9): Use AIBT radius
                      if (standInfo.distance < AIBT_STAND_RADIUS && lastPos.speed < 5) {
                          const aibt = getHktTime(lastPos.ts);
                          const eventData = { Callsign: info.callsign, IATA: info.iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
@@ -258,8 +277,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v6.9 — Dual Thresholds`);
+    console.log(`🛰️  HKT-Radar-Engine v7.0 — Initial Pos Lock`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`⚡ AIBT: 40m | AOBT: 15m (Hyper-Sensitive)`);
+    console.log(`🛡️  AIBT: 40m | AOBT: 15m Offset + Speed`);
     console.log(`=============================================\n`);
 });
