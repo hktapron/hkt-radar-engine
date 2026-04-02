@@ -42,13 +42,13 @@ const GROUND_INTERVAL = 15 * 1000;
 const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; 
 const PURGE_THRESHOLD = 60 * 60 * 1000; // 1 hour: Clear inactive memory
 
-// v8.1 Thresholds: Fast Response Tuning
+// v8.2 Thresholds: ACDM-Ready & Anti-Drift (AIQ9161, EY411 Fix)
 const AIBT_STAND_RADIUS = 60;        
 const AIBT_STABLE_REQUIRED = 2;      
-const AOBT_MOVEMENT_THRESHOLD = 15;  // Reduced from 20m
-const AOBT_ZERO_SPEED_THRESHOLD = 20; // Reduced from 30m (Fast catch for heavy)
-const AOBT_MIN_DISPLACEMENT = 12;     // Jitter Buffer (Safety balanced)
-const AOBT_STABLE_REQUIRED = 2;      
+const AOBT_MOVEMENT_THRESHOLD = 25;  // Increased from 15m to avoid drift
+const AOBT_ZERO_SPEED_THRESHOLD = 35; // Increased from 20m (Anti-Drift 20m)
+const AOBT_MIN_DISPLACEMENT = 15;     
+const AOBT_STABLE_REQUIRED = 3;      // Require 45s of sustained movement (3 polls)
 
 // Contiguous Approach Zones
 const APPROACH_ZONES = [
@@ -161,7 +161,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     if (!isFutureTime && (flight.isOnGround || flight.altitude < 100) && flight.altitude < 500) {
                         info.state = 'LANDED';
                         info.ata = getHktTime(fTimestamp);
-                        console.log(`  [EVENT] 🛬 ${callsign} TOUCHDOWN @ ${info.ata}`);
+                        console.log(`  [EVENT] [M13] 🛬 ${callsign} TOUCHDOWN (ATA: ${info.ata})`);
                     } else if (!isGroundScan) {
                         detailPromises.push((async () => {
                             try {
@@ -186,7 +186,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                             reportedArrivals.add(flight.id);
                             trackedArrivals.delete(flight.id);
-                            console.log(`  [EVENT] 🛑 ${callsign} PARKED @ ${aibt}`);
+                            console.log(`  [EVENT] [M14] 🛑 ${callsign} PARKED (AIBT: ${aibt}) | Stand: ${standInfo.stand}`);
                         } else {
                             responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: info.ata });
                         }
@@ -213,21 +213,23 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         displacement = currentStand.distance; 
                     }
 
-                    // AOBT (v8.1): Ultra-Stable Rules
+                    // AOBT (v8.2): ACDM-Ready & Anti-Drift Logic
                     const isMovingFast = (flight.speed >= 1.5 && displacement > AOBT_MIN_DISPLACEMENT);
                     const isMovingNormal = (flight.speed >= 0.8 && displacement > AOBT_MOVEMENT_THRESHOLD);
                     const isMovingZeroSpeed = (displacement > AOBT_ZERO_SPEED_THRESHOLD); 
 
                     if (flight.isOnGround && (isMovingFast || isMovingNormal || isMovingZeroSpeed)) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
-                        if (info.stallingCount >= AOBT_STABLE_REQUIRED || displacement > 20) {
+                        // v8.2: Stability is crucial for preventing early M11. 
+                        // Require 45s of move or high displacement (>40m)
+                        if (info.stallingCount >= AOBT_STABLE_REQUIRED || displacement > 40) {
                             info.state = 'TAXIING';
                             info.aobt = getHktTime(fTimestamp);
                             const standNr = info.lockedStand ? info.lockedStand.stand : currentStand.stand;
                             const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standNr };
                             responseData.set(flight.id, eventData);
                             recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
-                            console.log(`  [EVENT] 🚜 ${callsign} PUSHBACK detected (Move: ${displacement.toFixed(1)}m, Spd: ${flight.speed}) @ ${info.aobt}`);
+                            console.log(`  [EVENT] [M11] 🚜 ${callsign} PUSHBACK detected (Move: ${displacement.toFixed(1)}m, Spd: ${flight.speed}) (AOBT: ${info.aobt}) | Stand: ${standNr}`);
                         }
                     } else if (!flight.isOnGround) {
                         if (flight.altitude < 15000 && flight.altitude > 0) {
@@ -239,15 +241,15 @@ async function processFlightData(allFlights, now, isGroundScan) {
                                     // Use actual departure if available, but only if it's earlier than takeoff
                                     const actualDepTs = (detail.departure && detail.departure < fRawTimestamp / 1000) ? detail.departure : (info.lastSeen / 1000);
                                     info.aobt = getHktTime(actualDepTs);
-                                    console.log(`  [EVENT] 👻 ${callsign} GHOST PUSHBACK (Gate-Lock Source) @ ${info.aobt}`);
                                     const standNr = info.lockedStand ? info.lockedStand.stand : 'UNKNOWN';
+                                    console.log(`  [EVENT] [M11] 👻 ${callsign} GHOST PUSHBACK (Gate-Lock Source) (AOBT: ${info.aobt}) | Stand: ${standNr}`);
                                     const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, ATD: atd, Stand: standNr };
                                     responseData.set(flight.id, eventData);
                                     recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                                 } catch (e) {
                                     info.aobt = getHktTime(info.lastSeen);
-                                    console.log(`  [EVENT] 👻 ${callsign} GHOST PUSHBACK (Fallback Source) @ ${info.aobt}`);
                                     const standNr = info.lockedStand ? info.lockedStand.stand : 'UNKNOWN';
+                                    console.log(`  [EVENT] [M11] 👻 ${callsign} GHOST PUSHBACK (Fallback Source) (AOBT: ${info.aobt}) | Stand: ${standNr}`);
                                     const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, ATD: atd, Stand: standNr };
                                     responseData.set(flight.id, eventData);
                                     recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
@@ -274,7 +276,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                         reportedDepartures.add(flight.id);
                         trackedDepartures.delete(flight.id);
-                        console.log(`  [EVENT] 🛫 ${callsign} TOOK OFF @ ${atd}`);
+                        console.log(`  [EVENT] [M12] 🛫 ${callsign} TOOK OFF (ATD: ${atd})`);
                     } else {
                         responseData.set(flight.id, { Callsign: callsign, IATA: iata, AOBT: info.aobt });
                     }
@@ -305,7 +307,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                          recentEvents.set(id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                          reportedArrivals.add(id);
                          trackedArrivals.delete(id);
-                         console.log(`  [EVENT] 👻 ${info.callsign} GHOST ARRIVAL @ ${aibt}`);
+                         console.log(`  [EVENT] [M14] 👻 ${info.callsign} GHOST ARRIVAL (AIBT: ${aibt}) | Stand: ${standInfo.stand}`);
                      }
                  }
             }
@@ -340,8 +342,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v8.1 — Fast Response Tuning`);
+    console.log(`🛰️  HKT-Radar-Engine v8.2 — ACDM-Ready & Anti-Drift`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 60s`);
-    console.log(`🛡️  Ground AOBT: 12m Buffer + 20m Zero-Spd`);
+    console.log(`🛡️  Stability: 3-Poll Move Req | Jitter Buffer 35m`);
     console.log(`=============================================\n`);
 });
