@@ -106,9 +106,9 @@ async function pollGroup(zones, groupName) {
         
         await processFlightData(Array.from(flightMap.values()), now, groupName === 'GROUND');
         
-        // v8.9 Increased Heartbeat Visibility
+        // v9.0 Clean Logs (Removed #Count)
         const totalTracking = trackedArrivals.size + trackedDepartures.size;
-        console.log(`[${new Date().toISOString()}] Loop [${groupName}] #${loopCounts[groupName]} | Active: ${totalTracking} | Found: ${flightMap.size} | Cache: ${recentEvents.size}`);
+        console.log(`[${new Date().toISOString()}] Loop [${groupName}] | Active: ${totalTracking} | Found: ${flightMap.size} | Cache: ${recentEvents.size}`);
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Loop [${groupName}] Fatal Error: ${error.message}`);
     }
@@ -349,7 +349,7 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v8.9 — Visibility Update`);
+    console.log(`🛰️  HKT-Radar-Engine v9.0 — Clean Logs`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 30s`);
     console.log(`🛡️  Tower Filter: ACTIVE | Multi-ID: ACTIVE`);
     console.log(`=============================================\n`);
