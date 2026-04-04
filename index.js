@@ -51,8 +51,8 @@ const GROUND_INTERVAL = 15000;
 const EVENT_PERSISTENCE_TTL = 5 * 60 * 1000; 
 const PURGE_THRESHOLD = 60 * 60 * 1000; // 1 hour: Clear inactive memory
 
-// v8.5 Balance Thresholds (Stability First)
-const AIBT_STAND_RADIUS = 60;        
+// v8.7 Dynamic Thresholds (Stability First)
+// Removed AIBT_STAND_RADIUS (Now dynamic from hkt_stands.js)
 const AIBT_STABLE_REQUIRED = 2;      
 const AOBT_MOVEMENT_THRESHOLD = 25;  
 const AOBT_ZERO_SPEED_THRESHOLD = 35; 
@@ -193,7 +193,8 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 
                 if (info.state === 'LANDED') {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    if (flight.speed <= 1.0 && standInfo.distance < AIBT_STAND_RADIUS) {
+                    // v8.7 Dynamic Arrival Radius (e.g. 70m, 90m, or 100m)
+                    if (flight.speed <= 1.0 && standInfo.distance < standInfo.radius) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
                         if (info.stallingCount >= AIBT_STABLE_REQUIRED) {
                             const aibt = getHktTime(fTimestamp);
@@ -202,7 +203,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                             reportedArrivals.add(flight.id);
                             trackedArrivals.delete(flight.id);
-                            console.log(`  [EVENT] [M14] 🛑 ${callsign} PARKED (AIBT: ${aibt}) | Stand: ${standInfo.stand}`);
+                            console.log(`  [EVENT] [M14] 🛑 ${callsign} PARKED (AIBT: ${aibt}) | Stand: ${standInfo.stand} (Radius: ${standInfo.radius}m)`);
                         } else {
                             responseData.set(flight.id, { Callsign: callsign, iata: iata, ATA: info.ata });
                         }
@@ -229,7 +230,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         displacement = currentStand.distance; 
                     }
 
-                    // AOBT (v8.2-v8.5 Balance): Anti-Drift Thresholds
+                    // AOBT (v8.2-v8.7 Balance): Anti-Drift Thresholds
                     const isMovingFast = (flight.speed >= 1.5 && displacement > AOBT_MIN_DISPLACEMENT);
                     const isMovingNormal = (flight.speed >= 0.8 && displacement > AOBT_MOVEMENT_THRESHOLD);
                     const isMovingZeroSpeed = (displacement > AOBT_ZERO_SPEED_THRESHOLD); 
@@ -275,7 +276,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         }
                     } else {
                         info.stallingCount = 0;
-                        if (currentStand.distance < AIBT_STAND_RADIUS) {
+                        if (currentStand.distance < currentStand.radius) {
                             info.lastSeen = fTimestamp;
                         }
                     }
@@ -312,7 +313,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                  const lastPos = info.lastPos;
                  if (lastPos) {
                      const standInfo = getStandInfo(lastPos.lat, lastPos.lon);
-                     if (standInfo.distance < AIBT_STAND_RADIUS && lastPos.speed < 5) {
+                     if (standInfo.distance < standInfo.radius && lastPos.speed < 5) {
                          const aibt = getHktTime(lastPos.ts);
                          const eventData = { Callsign: info.callsign, IATA: info.iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
                          responseData.set(id, eventData);
@@ -354,8 +355,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v8.6 — Strict Fix`);
+    console.log(`🛰️  HKT-Radar-Engine v8.7 — Dynamic Radius`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 30s`);
-    console.log(`🛡️  Targeted Bypass: JQ/WK ONLY | Normalization: ON`);
+    console.log(`🛡️  Targeted Bypass: JQ/WK ONLY | Geofence: DYNAMIC`);
     console.log(`=============================================\n`);
 });
