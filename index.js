@@ -114,7 +114,16 @@ async function pollGroup(zones, groupName) {
     }
 }
 
+// v9.1: Processing Lock — Prevents GROUND and APPROACH from interleaving
+let processLock = Promise.resolve();
+
 async function processFlightData(allFlights, now, isGroundScan) {
+    const ticket = processLock;
+    let releaseLock;
+    processLock = new Promise(resolve => { releaseLock = resolve; });
+    await ticket;
+
+    try {
     const responseData = new Map();
     const seenInThisPoll = new Set();
     
@@ -146,8 +155,15 @@ async function processFlightData(allFlights, now, isGroundScan) {
 
         const isWhitelisted = CARRIER_WHITELIST.some(prefix => normCallsign.startsWith(prefix));
 
+        // v9.1 JST72 Fix: Whitelisted flights stationary at a gate = DEPARTURE, not arrival
+        let isStationaryAtGate = false;
+        if (isGroundScan && isWhitelisted && flight.speed <= 1) {
+            const gateCheck = getStandInfo(flight.latitude, flight.longitude);
+            isStationaryAtGate = gateCheck.distance < gateCheck.radius;
+        }
+
         const isPhuketDeparture = isGroundScan || (origin === "HKT") || (flight.isOnGround && destination !== "" && destination !== "HKT");
-        const isPhuketArrival = (destination === "HKT") || (isGroundScan && isWhitelisted);
+        const isPhuketArrival = (destination === "HKT") || (isGroundScan && isWhitelisted && !isStationaryAtGate);
         
         if (!isPhuketDeparture && !isPhuketArrival) continue;
         if (reportedArrivals.has(flight.id) || reportedDepartures.has(flight.id)) continue;
@@ -283,12 +299,13 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     if (!flight.isOnGround) {
                         info.state = 'AIRBORNE';
                         const atd = getHktTime(fTimestamp);
-                        const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, ATD: atd };
+                        const standNr = info.lockedStand ? info.lockedStand.stand : 'UNKNOWN';
+                        const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, ATD: atd, Stand: standNr };
                         responseData.set(flight.id, eventData);
                         recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
                         reportedDepartures.add(flight.id);
                         trackedDepartures.delete(flight.id);
-                        console.log(`  [EVENT] [M12] 🛫 ${callsign} TOOK OFF (ATD: ${atd})`);
+                        console.log(`  [EVENT] [M12] 🛫 ${callsign} TOOK OFF (AOBT: ${info.aobt} | ATD: ${atd}) | Stand: ${standNr}`);
                     } else {
                         responseData.set(flight.id, { Callsign: callsign, iata: iata, AOBT: info.aobt });
                     }
@@ -332,6 +349,8 @@ async function processFlightData(allFlights, now, isGroundScan) {
 
     flightDataCache = Array.from(responseData.values());
     lastFetchTime = new Date();
+
+    } finally { releaseLock(); } // v9.1: Release processing lock
 }
 
 setInterval(() => pollGroup(APPROACH_ZONES, 'APPROACH'), APPROACH_INTERVAL);
@@ -349,8 +368,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v9.0 — Clean Logs`);
+    console.log(`🛰️  HKT-Radar-Engine v9.1 — Stability Patch`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 30s`);
-    console.log(`🛡️  Tower Filter: ACTIVE | Multi-ID: ACTIVE`);
+    console.log(`🛡️  ProcessLock: ON | GateFix: ON | M12+AOBT: ON`);
     console.log(`=============================================\n`);
 });
