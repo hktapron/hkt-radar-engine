@@ -162,7 +162,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
             isStationaryAtGate = gateCheck.distance < gateCheck.radius;
         }
 
-        const isPhuketDeparture = isGroundScan || (origin === "HKT") || (flight.isOnGround && destination !== "" && destination !== "HKT");
+        const isPhuketDeparture = (isGroundScan && flight.isOnGround) || (origin === "HKT") || (flight.isOnGround && destination !== "" && destination !== "HKT");
         const isPhuketArrival = (destination === "HKT") || (isGroundScan && isWhitelisted && !isStationaryAtGate && !trackedDepartures.has(flight.id));
         
         if (!isPhuketDeparture && !isPhuketArrival) continue;
@@ -368,8 +368,8 @@ app.get('/api/health', (req, res) => res.json({ status: 'ok', cacheLength: fligh
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v9.2 — Sticky Departures`);
+    console.log(`🛰️  HKT-Radar-Engine v9.3 — Ghost Landing Fix`);
     console.log(`🌐 Port ${PORT} | Apron: 15s | Approach: 30s`);
-    console.log(`🛡️  GhostSafe: ON | GateFix: 1.1 | M12+AOBT: ON`);
+    console.log(`🛡️  GhostSafe: 2.0 | GateFix: 1.1 | M12+AOBT: ON`);
     console.log(`=============================================\n`);
 });
