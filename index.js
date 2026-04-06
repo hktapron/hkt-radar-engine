@@ -246,7 +246,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
                     if (flight.speed <= 1.0 && standInfo.distance < standInfo.radius) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
-                        console.log(`  [TRACKING] ${callsign}: Stalling ${info.stallingCount}/${AIBT_STABLE_REQUIRED} (AIBT-Count | Dist: ${standInfo.distance.toFixed(1)}m | Spd: ${flight.speed})`);
+                        console.log(`  [EVENT] ${callsign}: Stalling ${info.stallingCount}/${AIBT_STABLE_REQUIRED} (AIBT-Count | Dist: ${standInfo.distance.toFixed(1)}m | Spd: ${flight.speed})`);
                         // v9.9: Back-dating (Capture first appearance)
                         if (info.stallingCount === 1) info.firstAIBT = fTimestamp;
                         
@@ -291,7 +291,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             originLat: flight.latitude, originLon: flight.longitude, 
                             lastSeen: fTimestamp, stallingCount: 0, firstAOBT: null 
                         });
-                        console.log(`  [INFO] ${callsign} discovered mid-taxi (${flight.speed}kts). Skipping AOBT tracking.`);
+                        console.log(`  [EVENT] ${callsign} discovered mid-taxi (${flight.speed}kts). Skipping AOBT tracking.`);
                     }
                 }
                 const info = trackedDepartures.get(flight.id);
@@ -316,7 +316,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     // v9.8: Speed Guard (Transition). A real pushback/initial taxi won't be > 30 knots.
                     if (flight.isOnGround && (isMovingFast || isMovingNormal || isMovingZeroSpeed) && (flight.speed < 30)) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
-                        console.log(`  [TRACKING] ${callsign}: Moving ${info.stallingCount}/${AOBT_STABLE_REQUIRED} (AOBT-Count | Dist: ${displacement.toFixed(1)}m | Spd: ${flight.speed})`);
+                        console.log(`  [EVENT] ${callsign}: Moving ${info.stallingCount}/${AOBT_STABLE_REQUIRED} (AOBT-Count | Dist: ${displacement.toFixed(1)}m | Spd: ${flight.speed})`);
                         // v9.9: Back-dating (Capture first movement)
                         if (info.stallingCount === 1) info.firstAOBT = fTimestamp;
 
