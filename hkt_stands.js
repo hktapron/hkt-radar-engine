@@ -19,38 +19,30 @@ const STANDS = [
     { nr: "9",   lat: 8.107764, lon: 98.305347, apron: "A", radius: 60 },
     { nr: "10",  lat: 8.107136, lon: 98.305186, apron: "A", radius: 60 },
 
-    // Apron A: Adjust 11-15 to 100m
-    { nr: "11",  lat: 8.106503, lon: 98.305083, apron: "A", radius: 100 },
-    { nr: "12L", lat: 8.106028, lon: 98.304603, apron: "A", radius: 100 },
-    { nr: "12",  lat: 8.105786, lon: 98.304831, apron: "A", radius: 100 },
-    { nr: "12R", lat: 8.105719, lon: 98.304742, apron: "A", radius: 100 },
-    { nr: "14L", lat: 8.105344, lon: 98.304425, apron: "A", radius: 100 },
-    { nr: "14",  lat: 8.105103, lon: 98.304653, apron: "A", radius: 100 },
-    { nr: "14R", lat: 8.105036, lon: 98.304561, apron: "A", radius: 100 },
-    { nr: "15",  lat: 8.104483, lon: 98.304508, apron: "A", radius: 100 },
+    // Apron A: Adjust 11-16 to 80m (v10.3)
+    { nr: "11",  lat: 8.106503, lon: 98.305083, apron: "A", radius: 80 },
+    { nr: "12",  lat: 8.105786, lon: 98.304831, apron: "A", radius: 80 },
+    { nr: "14",  lat: 8.105103, lon: 98.304653, apron: "A", radius: 80 },
+    { nr: "15",  lat: 8.104483, lon: 98.304508, apron: "A", radius: 80 },
+    { nr: "16",  lat: 8.103964, lon: 98.304372, apron: "A", radius: 80 },
 
-    // Apron A: Adjust 16 to 90m
-    { nr: "16",  lat: 8.103964, lon: 98.304372, apron: "A", radius: 90 },
-
-    // Apron D: Adjust 31-39 to 100m
-    { nr: "31",  lat: 8.109886, lon: 98.302925, apron: "D", radius: 100 },
-    { nr: "32L", lat: 8.109006, lon: 98.302769, apron: "D", radius: 100 },
-    { nr: "32",  lat: 8.109200, lon: 98.302747, apron: "D", radius: 100 },
-    { nr: "32R", lat: 8.109358, lon: 98.302864, apron: "D", radius: 100 },
-    { nr: "33L", lat: 8.108297, lon: 98.302583, apron: "D", radius: 100 },
-    { nr: "33",  lat: 8.108492, lon: 98.302558, apron: "D", radius: 100 },
-    { nr: "33R", lat: 8.108650, lon: 98.302675, apron: "D", radius: 100 },
-    { nr: "34L", lat: 8.107589, lon: 98.302397, apron: "D", radius: 100 },
-    { nr: "34",  lat: 8.107783, lon: 98.302372, apron: "D", radius: 100 },
-    { nr: "34R", lat: 8.107942, lon: 98.302489, apron: "D", radius: 100 },
-    { nr: "35",  lat: 8.107208, lon: 98.302400, apron: "D", radius: 100 },
-    { nr: "36",  lat: 8.106856, lon: 98.302308, apron: "D", radius: 100 },
-    { nr: "37",  lat: 8.106419, lon: 98.302128, apron: "D", radius: 100 },
-    { nr: "38",  lat: 8.105900, lon: 98.301992, apron: "D", radius: 100 },
-    { nr: "39",  lat: 8.105381, lon: 98.301853, apron: "D", radius: 100 },
-
-    // Apron D: Adjust 40 to 90m
-    { nr: "40",  lat: 8.104858, lon: 98.301717, apron: "D", radius: 90 }
+    // Apron D: Adjust 31-40 to 80m (v10.3)
+    { nr: "31",  lat: 8.109886, lon: 98.302925, apron: "D", radius: 80 },
+    { nr: "32L", lat: 8.109006, lon: 98.302769, apron: "D", radius: 80 },
+    { nr: "32",  lat: 8.109200, lon: 98.302747, apron: "D", radius: 80 },
+    { nr: "32R", lat: 8.109358, lon: 98.302864, apron: "D", radius: 80 },
+    { nr: "33L", lat: 8.108297, lon: 98.302583, apron: "D", radius: 80 },
+    { nr: "33",  lat: 8.108492, lon: 98.302558, apron: "D", radius: 80 },
+    { nr: "33R", lat: 8.108650, lon: 98.302675, apron: "D", radius: 80 },
+    { nr: "34L", lat: 8.107589, lon: 98.302397, apron: "D", radius: 80 },
+    { nr: "34",  lat: 8.107783, lon: 98.302372, apron: "D", radius: 80 },
+    { nr: "34R", lat: 8.107942, lon: 98.302489, apron: "D", radius: 80 },
+    { nr: "35",  lat: 8.107208, lon: 98.302400, apron: "D", radius: 80 },
+    { nr: "36",  lat: 8.106856, lon: 98.302308, apron: "D", radius: 80 },
+    { nr: "37",  lat: 8.106419, lon: 98.302128, apron: "D", radius: 80 },
+    { nr: "38",  lat: 8.105900, lon: 98.301992, apron: "D", radius: 80 },
+    { nr: "39",  lat: 8.105381, lon: 98.301853, apron: "D", radius: 80 },
+    { nr: "40",  lat: 8.104858, lon: 98.301717, apron: "D", radius: 80 }
 ];
 
 /**

@@ -399,8 +399,8 @@ async function processFlightData(allFlights, now, isGroundScan) {
                  const lastPos = info.lastPos;
                  if (lastPos) {
                      const standInfo = getStandInfo(lastPos.lat, lastPos.lon);
-                     // v9.7: More lenient distance for Ghost Arrival (radius + 40m)
-                     if (standInfo.distance < (standInfo.radius + 40) && lastPos.speed < 5) {
+                     // v10.3: Tightened Ghost Arrival buffer (radius + 15m) for more precision.
+                     if (standInfo.distance < (standInfo.radius + 15) && lastPos.speed < 5) {
                          const aibt = getHktTime(lastPos.ts);
                          const eventData = { Callsign: info.callsign, IATA: info.iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
                          responseData.set(id, eventData);
@@ -447,7 +447,7 @@ app.get('/api/external/flights', (req, res) => {
 });
 app.get('/api/health', (req, res) => res.json({ 
     status: 'ok', 
-    version: 'v10.2',
+    version: 'v10.3',
     uptime: Math.floor(process.uptime()) + 's',
     cacheLength: flightDataCache.length, 
     lastFetchTime, 
@@ -458,8 +458,8 @@ app.get('/api/health', (req, res) => res.json({
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v10.2 — Confidence Shield`);
+    console.log(`🛰️  HKT-Radar-Engine v10.3 — Precision Tuning`);
     console.log(`🌐 Port ${PORT} | Apron: 8s | Approach: 30s`);
-    console.log(`🛡️  Confidence: 50m/5kts | MoveDetection: Origin`);
+    console.log(`🛡️  GhostBuffer: Tight | RadiusLock: 80m (A/D)`);
     console.log(`=============================================\n`);
 });
