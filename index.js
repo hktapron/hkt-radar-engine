@@ -273,12 +273,26 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 // v9.8: Speed Guard (Discovery). Ignore high-speed runway rolls for pushback tracking.
                 if (!trackedDepartures.has(flight.id) && (flight.speed < 30)) {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    const lockedStand = (standInfo.distance < 100) || flight.isOnGround ? standInfo : null; 
-                    trackedDepartures.set(flight.id, { 
-                        callsign, iata, state: 'PARKED', aobt: null, lockedStand, 
-                        originLat: flight.latitude, originLon: flight.longitude, // v10.0 origin tracking
-                        lastSeen: fTimestamp, stallingCount: 0, firstAOBT: null 
-                    });
+                    // v10.2 Confidence Shield: Only lock to a stand if discovered nearly stationary and close to a gate.
+                    const isConfident = (standInfo.distance < 50) && (flight.speed < 5);
+                    
+                    if (isConfident) {
+                        trackedDepartures.set(flight.id, { 
+                            callsign, iata, state: 'PARKED', aobt: null, 
+                            lockedStand: standInfo, 
+                            originLat: flight.latitude, originLon: flight.longitude, 
+                            lastSeen: fTimestamp, stallingCount: 0, firstAOBT: null 
+                        });
+                    } else {
+                        // Discovered mid-taxi or metadata late. Skip M11 (AOBT) for data integrity.
+                        trackedDepartures.set(flight.id, { 
+                            callsign, iata, state: 'TAXIING', aobt: null, 
+                            lockedStand: null, 
+                            originLat: flight.latitude, originLon: flight.longitude, 
+                            lastSeen: fTimestamp, stallingCount: 0, firstAOBT: null 
+                        });
+                        console.log(`  [INFO] ${callsign} discovered mid-taxi (${flight.speed}kts). Skipping AOBT tracking.`);
+                    }
                 }
                 const info = trackedDepartures.get(flight.id);
                 if (!info) continue; // v9.8.1 Safety Guard
@@ -433,7 +447,7 @@ app.get('/api/external/flights', (req, res) => {
 });
 app.get('/api/health', (req, res) => res.json({ 
     status: 'ok', 
-    version: 'v10.1',
+    version: 'v10.2',
     uptime: Math.floor(process.uptime()) + 's',
     cacheLength: flightDataCache.length, 
     lastFetchTime, 
@@ -444,8 +458,8 @@ app.get('/api/health', (req, res) => res.json({
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v10.1 — Audit Logs`);
+    console.log(`🛰️  HKT-Radar-Engine v10.2 — Confidence Shield`);
     console.log(`🌐 Port ${PORT} | Apron: 8s | Approach: 30s`);
-    console.log(`🛡️  AuditLogs: ON | RelativeTracking: ON`);
+    console.log(`🛡️  Confidence: 50m/5kts | MoveDetection: Origin`);
     console.log(`=============================================\n`);
 });
