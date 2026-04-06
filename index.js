@@ -76,12 +76,12 @@ const GROUND_INTERVAL = 8000;
 const EVENT_PERSISTENCE_TTL = 10 * 60 * 1000; 
 const PURGE_THRESHOLD = 60 * 60 * 1000; // 1 hour: Clear inactive memory
 
-// v8.7 Dynamic Thresholds (Stability First)
+// v9.9 Dynamic Thresholds (Stability First)
 const AIBT_STABLE_REQUIRED = 2;      
-const AOBT_MOVEMENT_THRESHOLD = 25;  
-const AOBT_ZERO_SPEED_THRESHOLD = 35; 
+const AOBT_MOVEMENT_THRESHOLD = 45;  
+const AOBT_ZERO_SPEED_THRESHOLD = 55; 
 const AOBT_MIN_DISPLACEMENT = 15;     
-const AOBT_STABLE_REQUIRED = 3;      
+const AOBT_STABLE_REQUIRED = 5;      
 
 // v8.5-8.9 Configs
 const CARRIER_WHITELIST = ['JQ', 'WK', 'JST', 'EDW'];
@@ -208,7 +208,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 seenInThisPoll.add(flight.id);
                 if (!trackedArrivals.has(flight.id)) {
                     trackedArrivals.set(flight.id, { 
-                        callsign, iata, state: 'AIRBORNE', ata: null, lastETA: null, lastPos: null, stallingCount: 0, lastSeen: fTimestamp 
+                        callsign, iata, state: 'AIRBORNE', ata: null, lastETA: null, lastPos: null, stallingCount: 0, lastSeen: fTimestamp, firstAIBT: null 
                     });
                 }
                 const info = trackedArrivals.get(flight.id);
@@ -246,8 +246,12 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
                     if (flight.speed <= 1.0 && standInfo.distance < standInfo.radius) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
+                        // v9.9: Back-dating (Capture first appearance)
+                        if (info.stallingCount === 1) info.firstAIBT = fTimestamp;
+                        
                         if (info.stallingCount >= AIBT_STABLE_REQUIRED) {
-                            const aibt = getHktTime(fTimestamp);
+                            const aibtTS = info.firstAIBT || fTimestamp;
+                            const aibt = getHktTime(aibtTS);
                             const eventData = { Callsign: callsign, IATA: iata, ATA: info.ata, AIBT: aibt, Stand: standInfo.stand };
                             responseData.set(flight.id, eventData);
                             recentEvents.set(flight.id, { data: eventData, expiry: now + EVENT_PERSISTENCE_TTL });
@@ -259,6 +263,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         }
                     } else {
                         info.stallingCount = 0;
+                        info.firstAIBT = null;
                         responseData.set(flight.id, { Callsign: callsign, iata: iata, ATA: info.ata });
                     }
                 }
@@ -268,7 +273,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 if (!trackedDepartures.has(flight.id) && (flight.speed < 30)) {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
                     const lockedStand = (standInfo.distance < 100) || flight.isOnGround ? standInfo : null; 
-                    trackedDepartures.set(flight.id, { callsign, iata, state: 'PARKED', aobt: null, lockedStand, lastSeen: fTimestamp, stallingCount: 0 });
+                    trackedDepartures.set(flight.id, { callsign, iata, state: 'PARKED', aobt: null, lockedStand, lastSeen: fTimestamp, stallingCount: 0, firstAOBT: null });
                 }
                 const info = trackedDepartures.get(flight.id);
                 if (!info) continue; // v9.8.1 Safety Guard
@@ -290,9 +295,13 @@ async function processFlightData(allFlights, now, isGroundScan) {
                     // v9.8: Speed Guard (Transition). A real pushback/initial taxi won't be > 30 knots.
                     if (flight.isOnGround && (isMovingFast || isMovingNormal || isMovingZeroSpeed) && (flight.speed < 30)) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
-                        if (info.stallingCount >= AOBT_STABLE_REQUIRED || displacement > 40) {
+                        // v9.9: Back-dating (Capture first movement)
+                        if (info.stallingCount === 1) info.firstAOBT = fTimestamp;
+
+                        if (info.stallingCount >= AOBT_STABLE_REQUIRED || displacement > 60) {
                             info.state = 'TAXIING';
-                            info.aobt = getHktTime(fTimestamp);
+                            const aobtTS = info.firstAOBT || fTimestamp;
+                            info.aobt = getHktTime(aobtTS);
                             const standNr = info.lockedStand ? info.lockedStand.stand : currentStand.stand;
                             const eventData = { Callsign: callsign, IATA: iata, AOBT: info.aobt, Stand: standNr };
                             responseData.set(flight.id, eventData);
@@ -329,6 +338,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         }
                     } else {
                         info.stallingCount = 0;
+                        info.firstAOBT = null;
                         if (currentStand.distance < currentStand.radius) {
                             info.lastSeen = fTimestamp;
                         }
@@ -415,7 +425,7 @@ app.get('/api/external/flights', (req, res) => {
 });
 app.get('/api/health', (req, res) => res.json({ 
     status: 'ok', 
-    version: 'v9.8.1',
+    version: 'v9.9',
     uptime: Math.floor(process.uptime()) + 's',
     cacheLength: flightDataCache.length, 
     lastFetchTime, 
@@ -426,8 +436,8 @@ app.get('/api/health', (req, res) => res.json({
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v9.8.1 — Safety Guard`);
+    console.log(`🛰️  HKT-Radar-Engine v9.9 — Precision Back-dating`);
     console.log(`🌐 Port ${PORT} | Apron: 8s | Approach: 30s`);
-    console.log(`🛡️  SpeedGuard: 30kts | Safety: ON`);
+    console.log(`🛡️  Harden: 45m/55m | Back-dating: ENABLED`);
     console.log(`=============================================\n`);
 });
