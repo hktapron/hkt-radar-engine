@@ -179,17 +179,21 @@ async function processFlightData(allFlights, now, isGroundScan) {
 
         const isWhitelisted = CARRIER_WHITELIST.some(prefix => normCallsign.startsWith(prefix));
 
-        // v9.1 JST72 Fix: Whitelisted flights stationary at a gate = DEPARTURE, not arrival
-        let isStationaryAtGate = false;
-        if (isGroundScan && isWhitelisted && flight.speed <= 1) {
-            const gateCheck = getStandInfo(flight.latitude, flight.longitude);
-            isStationaryAtGate = gateCheck.distance < gateCheck.radius;
-        }
+        // v10.6 Geofence Lock: If physically at a gate during a ground scan, prioritize DEPARTURE.
+        // This prevents whitelisted flights from being hijacked by 'destination: HKT' metadata while pushing back.
+        const standInfo = getStandInfo(flight.latitude, flight.longitude);
+        const isInsideGate = (isGroundScan && standInfo.distance < standInfo.radius);
 
         let isPhuketDeparture = (isGroundScan && flight.isOnGround) || (origin === "HKT") || (flight.isOnGround && destination !== "" && destination !== "HKT");
-        let isPhuketArrival = (destination === "HKT") || (isGroundScan && isWhitelisted && !isStationaryAtGate);
+        let isPhuketArrival = (destination === "HKT") || (isGroundScan && isWhitelisted && !isInsideGate);
         
-        // v9.4: Strict Stickiness (State Lock). Prevent hijacking!
+        // v10.6 Mastery: Force Departure state for whitelisted aircraft discovered at a gate
+        if (isGroundScan && isWhitelisted && isInsideGate) {
+            isPhuketDeparture = true;
+            isPhuketArrival = false;
+        }
+
+        // v9.4: Strict Stickiness (State Lock). Prevent hijacking for flights already in mid-process!
         if (trackedDepartures.has(flight.id)) {
             isPhuketArrival = false;
             isPhuketDeparture = true;
@@ -199,7 +203,26 @@ async function processFlightData(allFlights, now, isGroundScan) {
         }
         
         if (!isPhuketDeparture && !isPhuketArrival) continue;
-        if (reportedArrivals.has(flight.id) || reportedDepartures.has(flight.id)) continue;
+
+        // v10.5: Turnaround Handover Logic
+        // If the ID was already reported as an Arrival, only allow it to proceed if it is NOW a Departure 
+        // AND it is still safely stationary at a gate (to prevent takeover during landing roll).
+        const hasFinishedArrival = reportedArrivals.has(flight.id);
+        const hasFinishedDeparture = reportedDepartures.has(flight.id);
+
+        if (hasFinishedDeparture) continue; // v10.5: Never re-track a departure session that already finished.
+
+        if (hasFinishedArrival) {
+            const standInfo = getStandInfo(flight.latitude, flight.longitude);
+            const isStationaryTurnaround = (flight.speed < 5) && (standInfo.distance < (standInfo.radius + 10));
+            
+            // Bypass the arrival block if it's explicitly a departure now and stationary at gate
+            if (isPhuketDeparture && isStationaryTurnaround && origin === "HKT") {
+                isPhuketArrival = false; // Force departure track
+            } else {
+                continue; // Block duplicate arrivals or pre-mature turnovers
+            }
+        }
 
         const iata = flight.flight || flight.registration || 'UNKNOWN';
 
@@ -459,7 +482,7 @@ app.get('/api/external/flights', (req, res) => {
 });
 app.get('/api/health', (req, res) => res.json({ 
     status: 'ok', 
-    version: 'v10.4',
+    version: 'v10.6',
     uptime: Math.floor(process.uptime()) + 's',
     cacheLength: flightDataCache.length, 
     lastFetchTime, 
@@ -470,8 +493,8 @@ app.get('/api/health', (req, res) => res.json({
 
 app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v10.4 — The First Step`);
+    console.log(`🛰️  HKT-Radar-Engine v10.6 — The Geofence Lock`);
     console.log(`🌐 Port ${PORT} | Apron: 8s | Approach: 30s`);
-    console.log(`🛡️  Precision: 15m (Back-date) | Jitter: Tuned`);
+    console.log(`🛡️  Precision: 15m | Geofence: Activated`);
     console.log(`=============================================\n`);
 });
