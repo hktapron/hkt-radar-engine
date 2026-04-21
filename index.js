@@ -1,12 +1,13 @@
 const express = require('express');
 const cors = require('cors');
 const { fetchFromRadar, fetchFlight } = require('flightradar24-client');
-const { getStandInfo, STANDS } = require('./hkt_stands');
+const { getStandInfo, getDistance, STANDS } = require('./hkt_stands');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
+const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || '*'; // Bug #9: set ALLOWED_ORIGIN env var to tighten in production
+app.use(cors({ origin: ALLOWED_ORIGIN }));
 
 // v9.6: Rate Limiting (30 requests/min per IP — no library needed)
 const rateLimitMap = new Map();
@@ -97,21 +98,16 @@ const GROUND_ZONES = [
     { name: 'HKT-Full-Ground', north: 8.125, west: 98.295, south: 8.090, east: 98.345, options: { onGround: true, inactive: true } },
 ];
 
-/**
- * Calculates distance between two WGS-84 points in meters
- */
-function getDistance(lat1, lon1, lat2, lon2) {
-    const R = 6371e3; 
-    const p1 = lat1 * Math.PI / 180;
-    const p2 = lat2 * Math.PI / 180;
-    const dp = (lat2 - lat1) * Math.PI / 180;
-    const dl = (lon2 - lon1) * Math.PI / 180;
-    const a = Math.sin(dp / 2) * Math.sin(dp / 2) + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) * Math.sin(dl / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-}
+// getDistance is imported from hkt_stands.js (single source of truth)
+
+const pollRunning = new Set(); // Bug #6: prevent overlapping polls per group
 
 async function pollGroup(zones, groupName) {
+    if (pollRunning.has(groupName)) {
+        console.log(`[${new Date().toISOString()}] ⏭️  Loop [${groupName}] skipped — previous poll still running`);
+        return;
+    }
+    pollRunning.add(groupName);
     try {
         const now = new Date().getTime();
         const flightMap = new Map();
@@ -124,17 +120,19 @@ async function pollGroup(zones, groupName) {
                 }
                 await new Promise(resolve => setTimeout(resolve, 200)); 
             } catch (err) {
-                console.log(`  ⚠️ ${zone.name} radar check failed: ${err.message}`);
+                console.error(`  ⚠️ ${zone.name} radar check failed: ${err.message}`);
             }
         }
-        
+
         await processFlightData(Array.from(flightMap.values()), now, groupName === 'GROUND');
-        
+
         // v9.0 Clean Logs (Removed #Count)
         const totalTracking = trackedArrivals.size + trackedDepartures.size;
         console.log(`[${new Date().toISOString()}] Loop [${groupName}] | Active: ${totalTracking} | Found: ${flightMap.size} | Cache: ${recentEvents.size}`);
     } catch (error) {
         console.error(`[${new Date().toISOString()}] Loop [${groupName}] Fatal Error: ${error.message}`);
+    } finally {
+        pollRunning.delete(groupName); // Bug #6: always release lock
     }
 }
 
@@ -178,6 +176,9 @@ async function processFlightData(allFlights, now, isGroundScan) {
         if (BLACKLIST_CALLSIGNS.includes(normCallsign)) continue;
 
         const isWhitelisted = CARRIER_WHITELIST.some(prefix => normCallsign.startsWith(prefix));
+
+        // Bug #12: Skip flights with missing coordinates — getStandInfo would return NaN distances
+        if (flight.latitude == null || flight.longitude == null) continue;
 
         // v10.6 Geofence Lock: If physically at a gate during a ground scan, prioritize DEPARTURE.
         // This prevents whitelisted flights from being hijacked by 'destination: HKT' metadata while pushing back.
@@ -240,7 +241,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 info.lastSeen = fTimestamp;
                 info.lastPos = { lat: flight.latitude, lon: flight.longitude, speed: flight.speed, ts: fTimestamp };
 
-                if (info.state === 'LANDED' && flight.altitude > 1500) {
+                if (info.state === 'LANDED' && (flight.altitude ?? 0) > 1500) {
                     console.log(`  ♻️ ${callsign} RECOVERY: Resetting to AIRBORNE (Altitude: ${flight.altitude}ft)`);
                     info.state = 'AIRBORNE';
                     info.ata = null;
@@ -248,7 +249,8 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 }
 
                 if (info.state === 'AIRBORNE') {
-                    if (!isFutureTime && (flight.isOnGround || flight.altitude < 100) && flight.altitude < 500) {
+                    const alt = flight.altitude ?? 0; // Bug #3: treat missing altitude as ground-level
+                    if (!isFutureTime && (flight.isOnGround || alt < 100) && alt < 500) {
                         info.state = 'LANDED';
                         info.ata = getHktTime(fTimestamp);
                         console.log(`  [EVENT] [M13] 🛬 ${callsign} TOUCHDOWN (ATA: ${info.ata})`);
@@ -267,9 +269,10 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 
                 if (info.state === 'LANDED') {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    if (flight.speed <= 1.0 && standInfo.distance < standInfo.radius) {
+                    const spd = flight.speed ?? 0; // Bug #3: treat missing speed as stationary
+                    if (spd <= 1.0 && standInfo.distance < standInfo.radius) {
                         info.stallingCount = (info.stallingCount || 0) + 1;
-                        console.log(`  [EVENT] ${callsign}: Stalling ${info.stallingCount}/${AIBT_STABLE_REQUIRED} (AIBT-Count | Dist: ${standInfo.distance.toFixed(1)}m | Spd: ${flight.speed})`);
+                        console.log(`  [EVENT] ${callsign}: Stalling ${info.stallingCount}/${AIBT_STABLE_REQUIRED} (AIBT-Count | Dist: ${standInfo.distance.toFixed(1)}m | Spd: ${spd})`);
                         // v9.9: Back-dating (Capture first appearance)
                         if (info.stallingCount === 1) info.firstAIBT = fTimestamp;
                         
@@ -283,23 +286,24 @@ async function processFlightData(allFlights, now, isGroundScan) {
                             trackedArrivals.delete(flight.id);
                             console.log(`  [EVENT] [M14] 🛑 ${callsign} PARKED (AIBT: ${aibt}) | Stand: ${standInfo.stand} (Radius: ${standInfo.radius}m)`);
                         } else {
-                            responseData.set(flight.id, { Callsign: callsign, iata: iata, ATA: info.ata });
+                            responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: info.ata });
                         }
                     } else {
                         info.stallingCount = 0;
                         info.firstAIBT = null;
-                        responseData.set(flight.id, { Callsign: callsign, iata: iata, ATA: info.ata });
+                        responseData.set(flight.id, { Callsign: callsign, IATA: iata, ATA: info.ata });
                     }
                 }
             } else if (isPhuketDeparture) {
                 seenInThisPoll.add(flight.id);
                 // v9.8: Speed Guard (Discovery). Ignore high-speed runway rolls for pushback tracking.
-                if (!trackedDepartures.has(flight.id) && (flight.speed < 30)) {
+                const dspd = flight.speed ?? 0; // Bug #3: treat missing speed as stationary
+                if (!trackedDepartures.has(flight.id) && (dspd < 30)) {
                     const standInfo = getStandInfo(flight.latitude, flight.longitude);
-                    // v10.4 Tuned Confidence Shield: 
+                    // v10.4 Tuned Confidence Shield:
                     // 1. If right at the gate center (<30m): Allow higher jitter speed (12kts) — Fixes FD3159
                     // 2. If intermediate (30-50m): Strict 5kts rule applies.
-                    const isConfident = (standInfo.distance < 30 && flight.speed < 12) || (standInfo.distance < 50 && flight.speed < 5);
+                    const isConfident = (standInfo.distance < 30 && dspd < 12) || (standInfo.distance < 50 && dspd < 5);
                     
                     if (isConfident) {
                         trackedDepartures.set(flight.id, { 
@@ -412,7 +416,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                         trackedDepartures.delete(flight.id);
                         console.log(`  [EVENT] [M12] 🛫 ${callsign} TOOK OFF (AOBT: ${info.aobt} | ATD: ${atd}) | Stand: ${standNr}`);
                     } else {
-                        responseData.set(flight.id, { Callsign: callsign, iata: iata, AOBT: info.aobt });
+                        responseData.set(flight.id, { Callsign: callsign, IATA: iata, AOBT: info.aobt });
                     }
                 }
             }
@@ -427,6 +431,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
     }
 
     // Ground persistence logic (Arrival Ghosts)
+    // v10.7: Purge logic moved to dedicated interval — this block keeps only detection logic
     if (isGroundScan) {
         for (const [id, info] of trackedArrivals.entries()) {
             if (seenInThisPoll.has(id)) continue;
@@ -446,10 +451,6 @@ async function processFlightData(allFlights, now, isGroundScan) {
                      }
                  }
             }
-            if (now - info.lastSeen > PURGE_THRESHOLD) trackedArrivals.delete(id);
-        }
-        for (const [id, info] of trackedDepartures.entries()) {
-            if (now - info.lastSeen > PURGE_THRESHOLD) trackedDepartures.delete(id);
         }
     }
 
@@ -469,11 +470,34 @@ setInterval(() => {
     console.log(`[${new Date().toISOString()}] 🧹 Memory Purge: Cleared ${beforeA} arrivals + ${beforeD} departures`);
 }, MEMORY_PURGE_INTERVAL);
 
+// v10.7: Stale Tracking Purge — Runs independently of ground scan so maps don't leak if
+// ground fetches fail. Uses processLock to avoid racing with processFlightData.
+const TRACKING_PURGE_INTERVAL = 5 * 60 * 1000; // 5 minutes
+setInterval(async () => {
+    const ticket = processLock;
+    let releaseLock;
+    processLock = new Promise(resolve => { releaseLock = resolve; });
+    await ticket;
+    try {
+        const now = Date.now();
+        let purgedA = 0, purgedD = 0;
+        for (const [id, info] of trackedArrivals.entries()) {
+            if (now - info.lastSeen > PURGE_THRESHOLD) { trackedArrivals.delete(id); purgedA++; }
+        }
+        for (const [id, info] of trackedDepartures.entries()) {
+            if (now - info.lastSeen > PURGE_THRESHOLD) { trackedDepartures.delete(id); purgedD++; }
+        }
+        if (purgedA + purgedD > 0) {
+            console.log(`[${new Date().toISOString()}] 🧹 Tracking Purge: Cleared ${purgedA} arrivals + ${purgedD} departures (stale >1h)`);
+        }
+    } finally { releaseLock(); }
+}, TRACKING_PURGE_INTERVAL);
+
 setInterval(() => pollGroup(APPROACH_ZONES, 'APPROACH'), APPROACH_INTERVAL);
 setInterval(() => pollGroup(GROUND_ZONES, 'GROUND'), GROUND_INTERVAL);
 
-pollGroup(APPROACH_ZONES, 'APPROACH');
-setTimeout(() => pollGroup(GROUND_ZONES, 'GROUND'), 2000); 
+pollGroup(APPROACH_ZONES, 'APPROACH').catch(err => console.error(`[INIT] APPROACH poll failed: ${err.message}`));
+setTimeout(() => pollGroup(GROUND_ZONES, 'GROUND').catch(err => console.error(`[INIT] GROUND poll failed: ${err.message}`)), 2000);
 
 app.get('/api/flights/eta', (req, res) => res.json(flightDataCache));
 app.get('/api/external/flights', (req, res) => {
@@ -482,7 +506,7 @@ app.get('/api/external/flights', (req, res) => {
 });
 app.get('/api/health', (req, res) => res.json({ 
     status: 'ok', 
-    version: 'v10.6',
+    version: 'v10.7',
     uptime: Math.floor(process.uptime()) + 's',
     cacheLength: flightDataCache.length, 
     lastFetchTime, 
@@ -491,10 +515,22 @@ app.get('/api/health', (req, res) => res.json({
     memoryDepartures: reportedDepartures.size
 }));
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`\n=============================================`);
-    console.log(`🛰️  HKT-Radar-Engine v10.6 — The Geofence Lock`);
+    console.log(`🛰️  HKT-Radar-Engine v10.7 — The Geofence Lock`);
     console.log(`🌐 Port ${PORT} | Apron: 8s | Approach: 30s`);
     console.log(`🛡️  Precision: 15m | Geofence: Activated`);
     console.log(`=============================================\n`);
 });
+
+// Bug #10: Graceful shutdown — let in-flight requests drain before exiting
+function shutdown(signal) {
+    console.log(`[${new Date().toISOString()}] 🛑 ${signal} received — shutting down gracefully`);
+    server.close(() => {
+        console.log(`[${new Date().toISOString()}] ✅ Server closed. Exiting.`);
+        process.exit(0);
+    });
+    setTimeout(() => { console.error('Forced exit after 10s'); process.exit(1); }, 10000);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));

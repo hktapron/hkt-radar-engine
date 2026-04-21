@@ -90,5 +90,6 @@ function getStandInfo(lat, lon) {
 
 module.exports = {
     STANDS,
-    getStandInfo
+    getStandInfo,
+    getDistance
 };
