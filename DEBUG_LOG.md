@@ -96,3 +96,25 @@
 - Bumped: `v10.6` → `v10.7` (index.js startup banner + `/api/health` response)
 
 ---
+
+## 2026-04-21 (Hotfix — Recheck Round)
+
+### 🔴 REGRESSION FIX — Bug #3 touchdown detection (line 252)
+**Files:** `index.js`
+**Problem found in recheck:** ใช้ `flight.altitude ?? 0` ทำให้ altitude missing → alt=0 → `0 < 100` = true + `0 < 500` = true → TOUCHDOWN ยิงเสมอแม้เครื่องยังบินอยู่
+**Fix:** เปลี่ยนเป็น `flight.altitude ?? Infinity` — `Infinity < 100` = false, `Infinity < 500` = false → behavior เหมือนเดิมตอน altitude ขาดข้อมูล (ไม่ยิง)
+**Note:** Line 244 (`?? 0` สำหรับ `> 1500`) ยังถูกต้อง — `0 > 1500` = false เหมือนกัน
+
+### 🟡 Bug #8 — ยังเหลือ console.log อีก 1 จุด (line 424)
+**Files:** `index.js`
+**Fix:** `console.log('⚠️ Error processing ...')` → `console.error(...)`
+**Note:** รอบแรกเห็นแค่ line 127 miss line 424 ไป
+
+### 📌 7 จุดที่เหลือ (ตัดสินใจ NOT fix)
+Lines 218, 343, 344, 355, 373, 396, 443 — ยังมี `flight.speed`/`flight.altitude` ที่ไม่ได้ guard
+**Decision:** ปล่อย fallback เป็น false ไว้ — ในระบบ radar miss detection เงียบๆ ดีกว่า false positive
+ไม่ใช่ regression (behavior เหมือนก่อนแก้), ไม่กระทบ Logic Locks
+
+---
+
+---

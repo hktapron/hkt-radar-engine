@@ -249,7 +249,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 }
 
                 if (info.state === 'AIRBORNE') {
-                    const alt = flight.altitude ?? 0; // Bug #3: treat missing altitude as ground-level
+                    const alt = flight.altitude ?? Infinity; // missing altitude → Infinity, so alt<100 and alt<500 are both false (safe fallback)
                     if (!isFutureTime && (flight.isOnGround || alt < 100) && alt < 500) {
                         info.state = 'LANDED';
                         info.ata = getHktTime(fTimestamp);
@@ -421,7 +421,7 @@ async function processFlightData(allFlights, now, isGroundScan) {
                 }
             }
         } catch (err) {
-            console.log(`  ⚠️ Error processing ${callsign}: ${err.message}`);
+            console.error(`  ⚠️ Error processing ${callsign}: ${err.message}`);
         }
     }
     
